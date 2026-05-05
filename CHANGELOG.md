@@ -7,12 +7,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-## [0.0.2](https://github.com/OxideAV/oxideav-hdr/compare/v0.0.1...v0.0.2) - 2026-05-05
-
-### Other
-
-- clippy needless_range_loop fix in solid_colour_roundtrips_via_repeat_run
-
 ### Added
 
 - Round 2: old-RLE encoder (`encode_scanline_old_rle`) — the
@@ -35,9 +29,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   ImageMagick-written files parse, XYZE↔RGB conversion round-trips
   through ImageMagick within the format's precision. Tests skip
   automatically if `magick` isn't on `PATH`.
-- Initial release: pure-Rust Radiance RGBE (`.hdr` / `.pic`) reader +
-  writer covering the standard new-RLE pixel encoding plus the older
-  pre-1991 sentinel-pixel old-RLE format on the read path.
+
+## [0.0.2](https://github.com/OxideAV/oxideav-hdr/compare/v0.0.1...v0.0.2) - 2026-05-05
+
+### Other
+
+- clippy needless_range_loop fix in solid_colour_roundtrips_via_repeat_run
+
+## [0.0.1] - Initial release
+
+### Added
+
+- Pure-Rust Radiance RGBE (`.hdr` / `.pic`) reader + writer covering
+  the standard new-RLE pixel encoding plus the older pre-1991
+  sentinel-pixel old-RLE format on the read path.
 - Header parser handles `#?RADIANCE` and `#?RGBE` magic lines, an
   arbitrary list of `KEY=VALUE` metadata records (FORMAT, EXPOSURE,
   GAMMA, SOFTWARE, COLORCORR, PIXASPECT, …), the empty-line
