@@ -167,9 +167,9 @@ mod tests {
             "solid-colour payload is {approx_payload} bytes — repeat-run path likely broken"
         );
         let back = parse_hdr(&bytes).unwrap();
-        for i in 0..pixels.len() {
-            let err = (pixels[i] - back.pixels[i]).abs();
-            assert!(err < 0.01, "pixel {i}: {} vs {}", pixels[i], back.pixels[i]);
+        for (i, (a, b)) in pixels.iter().zip(back.pixels.iter()).enumerate() {
+            let err = (a - b).abs();
+            assert!(err < 0.01, "pixel {i}: {a} vs {b}");
         }
     }
 
