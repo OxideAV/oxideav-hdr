@@ -1,0 +1,32 @@
+[package]
+name = "oxideav-hdr"
+version = "0.0.1"
+edition = "2021"
+rust-version = "1.80"
+license = "MIT"
+repository = "https://github.com/OxideAV/oxideav-hdr"
+homepage = "https://github.com/OxideAV/oxideav-hdr"
+authors = ["Mark Karpeles"]
+description = "Pure-Rust Radiance RGBE (.hdr / .pic) decoder + encoder for oxideav — clean-room, default-on registry feature"
+readme = "README.md"
+keywords = ["multimedia", "image", "hdr", "radiance", "rgbe"]
+categories = ["multimedia::encoding", "multimedia::images"]
+
+[dependencies]
+# `oxideav-core` is gated behind the default-on `registry` feature so
+# image-library consumers can depend on `oxideav-hdr` with
+# `default-features = false` and avoid the framework dependency tree
+# entirely. Without `registry` the crate exposes the standalone
+# `parse_hdr` / `encode_hdr` API plus crate-local `HdrImage` /
+# `HdrError` types and never references `oxideav-core`.
+oxideav-core = { version = "0.1", optional = true }
+
+[features]
+default = ["registry"]
+
+# Wires up the codec / encoder / decoder / container demuxer + muxer
+# trait implementations against `oxideav-core` so the crate can plug
+# into the `oxideav` framework registry. Default-on; turn off for
+# image-library use-cases that just want the standalone `parse_hdr`
+# / `encode_hdr` API.
+registry = ["dep:oxideav-core"]
