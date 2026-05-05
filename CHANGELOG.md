@@ -15,6 +15,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Round 2: old-RLE encoder (`encode_scanline_old_rle`) — the
+  pre-1991 per-pixel literal + chained `(1, 1, 1, n)` sentinel-run
+  format. Exposed via `encode_hdr_with_rle(image, RleMode::Old)` for
+  callers targeting legacy viewers or images outside the new-RLE
+  width range.
+- Round 2: XYZE ↔ RGB conversion helpers in `oxideav_hdr::xyz`.
+  Forward and inverse matrices for sRGB / Rec. 709 (D65 white) and
+  Greg Ward's original Radiance primaries (E white).
+  `convert_image_xyz_to_rgb` / `convert_image_rgb_to_xyz` mutate an
+  `HdrImage` in place and flip the header's FORMAT tag accordingly.
+- Round 2: tone-mapping helpers in `oxideav_hdr::tonemap`: `Linear`,
+  `Gamma`, Reinhard 2002, and Krzysztof Narkowicz's polynomial ACES
+  fit. All apply the sRGB OETF on the way out (except `Linear`) and
+  quantise to packed 8-bit `Rgb24`. Convenience for downstream
+  consumers that need a display-ready preview from the float buffer.
+- Round 2: cross-validation against ImageMagick 7's HDR codec
+  (`tests/imagemagick_xvalidate.rs`): our encoder output decodes,
+  ImageMagick-written files parse, XYZE↔RGB conversion round-trips
+  through ImageMagick within the format's precision. Tests skip
+  automatically if `magick` isn't on `PATH`.
 - Initial release: pure-Rust Radiance RGBE (`.hdr` / `.pic`) reader +
   writer covering the standard new-RLE pixel encoding plus the older
   pre-1991 sentinel-pixel old-RLE format on the read path.

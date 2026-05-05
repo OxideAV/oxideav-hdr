@@ -194,6 +194,126 @@ fn decode_old_rle(
     Ok(out)
 }
 
+/// Encode one scanline using the *old* (pre-1991) RLE format —
+/// per-pixel literal bytes interleaved with `(1, 1, 1, n_low)`
+/// "sentinel" pixels that repeat the previous literal pixel. Useful for
+/// callers that need to write the legacy format (very narrow images, or
+/// fixtures targeting old viewers that don't grok the new-RLE marker).
+///
+/// The first pixel cannot be a sentinel — there is no previous pixel
+/// for it to repeat — so the encoder always emits at least one literal
+/// at the start of the scanline. Run lengths above 255 are split into
+/// chained sentinels (each carries one byte of the run length, low to
+/// high, shifted by 8 each). The chained-sentinel grammar caps the run
+/// at 24 bits (`0xFF_FFFF`); longer runs are split into multiple
+/// literal+sentinel pairs.
+///
+/// A literal pixel whose mantissa happens to be `(1, 1, 1)` would be
+/// indistinguishable from a sentinel on the read side, so we promote
+/// it to `(2, 1, 1)` (least-significant-bit nudge on the red channel)
+/// before writing. This matches what Greg Ward's reference writer did
+/// to sidestep the same ambiguity.
+pub fn encode_scanline_old_rle(
+    channels: &[Vec<u8>; 4],
+    width: usize,
+    out: &mut Vec<u8>,
+) -> Result<()> {
+    if width == 0 {
+        return Err(Error::invalid("HDR encoder: zero-width old-RLE scanline"));
+    }
+    if channels[0].len() != width
+        || channels[1].len() != width
+        || channels[2].len() != width
+        || channels[3].len() != width
+    {
+        return Err(Error::invalid(
+            "HDR encoder: old-RLE channel length mismatch",
+        ));
+    }
+    let mut i = 0usize;
+    let mut prev: Option<[u8; 4]> = None;
+    while i < width {
+        // Sanitise the current pixel so it can't collide with the
+        // sentinel marker `(1, 1, 1, *)`. We bump the red mantissa to
+        // 2 — the on-disk format quantises in 1/256 units so this is a
+        // ~0.4% perturbation, well below the shared-exponent noise.
+        let mut pixel = [
+            channels[0][i],
+            channels[1][i],
+            channels[2][i],
+            channels[3][i],
+        ];
+        if pixel[0] == 1 && pixel[1] == 1 && pixel[2] == 1 {
+            pixel[0] = 2;
+        }
+        // First pixel of the scanline must be a literal.
+        if prev != Some(pixel) || i == 0 {
+            out.extend_from_slice(&pixel);
+            prev = Some(pixel);
+            i += 1;
+            continue;
+        }
+        // We already emitted a literal matching `pixel`. Count further
+        // identical pixels and emit a chained-sentinel run.
+        let mut run = 0usize;
+        while i < width && run < 0x00FF_FFFF {
+            let cur = [
+                channels[0][i],
+                channels[1][i],
+                channels[2][i],
+                channels[3][i],
+            ];
+            let cur = if cur[0] == 1 && cur[1] == 1 && cur[2] == 1 {
+                [2, cur[1], cur[2], cur[3]]
+            } else {
+                cur
+            };
+            if cur != pixel {
+                break;
+            }
+            run += 1;
+            i += 1;
+        }
+        // `run` is the number of *additional* identical pixels we want
+        // to emit. The decoder treats each chained-sentinel byte as
+        // shifted by 8 bits, so we split the run length into 8-bit
+        // chunks low-to-high and emit them as a contiguous chain.
+        emit_run_chain(run, out);
+    }
+    Ok(())
+}
+
+fn emit_run_chain(run: usize, out: &mut Vec<u8>) {
+    if run == 0 {
+        return;
+    }
+    // The decoder accumulates `(byte << shift)` across consecutive
+    // chained sentinels, with `shift` advancing by 8 per sentinel.
+    // Each sentinel therefore contributes one *byte* of the binary
+    // expansion of the desired run length. We emit those bytes low to
+    // high. A zero byte in the middle of the chain still has to be
+    // written out — the next sentinel's shift depends on its position
+    // in the chain, not on the bytes around it — but any trailing zero
+    // bytes can simply be dropped (they'd contribute 0 each).
+    let mut bytes: [u8; 4] = [
+        (run & 0xFF) as u8,
+        ((run >> 8) & 0xFF) as u8,
+        ((run >> 16) & 0xFF) as u8,
+        ((run >> 24) & 0xFF) as u8,
+    ];
+    // Cap at 24 bits (caller guarantees `run < 0x100_0000`) and drop
+    // trailing zero chunks.
+    debug_assert_eq!(bytes[3], 0, "old-RLE run length capped to 24 bits");
+    bytes[3] = 0;
+    let mut last = 3;
+    while last > 0 && bytes[last] == 0 {
+        last -= 1;
+    }
+    for &chunk in &bytes[..=last] {
+        out.extend_from_slice(&[1, 1, 1, chunk]);
+    }
+}
+
 /// Encode one scanline using the new-RLE format. Each of the four
 /// channels is RLE-coded independently and the four resulting streams
 /// are concatenated after the `0x02 0x02 hi lo` marker.
@@ -345,5 +465,95 @@ mod tests {
         assert_eq!(chans[1], vec![0x66; 6]);
         assert_eq!(chans[2], vec![0x77; 6]);
         assert_eq!(chans[3], vec![0x80; 6]);
+    }
+
+    fn decode_old_rle_only(src: &[u8], width: usize) -> [Vec<u8>; 4] {
+        // Force the old-RLE path by skipping the new-RLE marker probe.
+        let mut pos = 0;
+        let mut prev = None;
+        super::decode_old_rle(src, &mut pos, width, &mut prev).unwrap()
+    }
+
+    #[test]
+    fn old_rle_encode_roundtrip_literals_and_runs() {
+        // Mixed: 3 distinct literal pixels + 7 repeats + 2 distinct.
+        let chans = [
+            vec![
+                0x10, 0x40, 0x70, 0x70, 0x70, 0x70, 0x70, 0x70, 0x70, 0x80, 0x90,
+            ],
+            vec![
+                0x20, 0x50, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x10, 0x20,
+            ],
+            vec![
+                0x30, 0x60, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x30, 0x40,
+            ],
+            vec![
+                0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80,
+            ],
+        ];
+        let w = chans[0].len();
+        let mut encoded = Vec::new();
+        encode_scanline_old_rle(&chans, w, &mut encoded).unwrap();
+        let back = decode_old_rle_only(&encoded, w);
+        assert_eq!(back, chans);
+    }
+
+    #[test]
+    fn old_rle_encode_chained_sentinel_for_long_run() {
+        // 300 identical pixels (after a literal) needs a 2-byte chain
+        // (300 = 0x12C → chunks 0x2C low + 0x01 high → 44 + 256 = 300).
+        let mut chans: [Vec<u8>; 4] = [
+            vec![0x42; 301],
+            vec![0x55; 301],
+            vec![0x66; 301],
+            vec![0x80; 301],
+        ];
+        // Make the very first pixel different so we exercise the
+        // literal-then-run path rather than degenerate first-pixel-must-
+        // be-literal logic.
+        chans[0][0] = 0x10;
+        chans[1][0] = 0x20;
+        chans[2][0] = 0x30;
+        let w = chans[0].len();
+        let mut encoded = Vec::new();
+        encode_scanline_old_rle(&chans, w, &mut encoded).unwrap();
+        let back = decode_old_rle_only(&encoded, w);
+        assert_eq!(back, chans);
+    }
+
+    #[test]
+    fn old_rle_encode_avoids_sentinel_collision() {
+        // A literal pixel whose mantissa is (1, 1, 1) collides with
+        // the sentinel marker — encoder should perturb it.
+        let chans = [
+            vec![0x01, 0x40, 0x70],
+            vec![0x01, 0x50, 0x80],
+            vec![0x01, 0x60, 0x90],
+            vec![0x80, 0x80, 0x80],
+        ];
+        let mut encoded = Vec::new();
+        encode_scanline_old_rle(&chans, 3, &mut encoded).unwrap();
+        // First pixel on disk should NOT be (1, 1, 1, *).
+        assert_ne!(&encoded[..3], [1, 1, 1].as_slice());
+        let back = decode_old_rle_only(&encoded, 3);
+        // Round-trip preserves everything except the first pixel's red
+        // mantissa, which got nudged from 1 to 2.
+        assert_eq!(back[0][0], 2);
+        assert_eq!(back[1][0], 1);
+        assert_eq!(back[2][0], 1);
+        assert_eq!(back[3][0], 0x80);
+    }
+
+    #[test]
+    fn old_rle_encode_first_pixel_always_literal() {
+        // Even if all pixels are identical, the first one must be a
+        // literal — there's no previous pixel for it to repeat.
+        let chans = [vec![0x55; 4], vec![0x66; 4], vec![0x77; 4], vec![0x80; 4]];
+        let mut encoded = Vec::new();
+        encode_scanline_old_rle(&chans, 4, &mut encoded).unwrap();
+        // First 4 bytes should be the literal pixel itself.
+        assert_eq!(&encoded[..4], &[0x55, 0x66, 0x77, 0x80]);
+        let back = decode_old_rle_only(&encoded, 4);
+        assert_eq!(back, chans);
     }
 }

@@ -19,7 +19,18 @@ use crate::error::{HdrError as Error, Result};
 use crate::header::HdrHeader;
 use crate::image::{HdrImage, HdrPixelFormat};
 use crate::rgbe::rgb_to_rgbe;
-use crate::rle::encode_scanline;
+use crate::rle::{encode_scanline, encode_scanline_old_rle};
+
+/// Choice of RLE flavour for the encoded scanlines.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RleMode {
+    /// Greg Ward's adaptive new-RLE (`0x02 0x02 hi lo` marker per
+    /// scanline). Width must be in `8..=32767`.
+    New,
+    /// Pre-1991 old-RLE: per-pixel literals interleaved with chained
+    /// `(1, 1, 1, n)` sentinel runs. No width restriction.
+    Old,
+}
 
 #[cfg(feature = "registry")]
 use oxideav_core::Encoder;
@@ -143,6 +154,16 @@ impl Encoder for HdrEncoder {
 /// Encode an [`HdrImage`] into a complete HDR file (magic line +
 /// `KEY=VALUE` header + resolution line + new-RLE pixel rows).
 pub fn encode_hdr(image: &HdrImage) -> Result<Vec<u8>> {
+    encode_hdr_with_rle(image, RleMode::New)
+}
+
+/// Like [`encode_hdr`] but with an explicit choice of RLE flavour.
+///
+/// Use [`RleMode::Old`] for outputs targeting consumers that don't
+/// recognise the post-1991 `0x02 0x02 hi lo` scanline marker (very
+/// narrow images that fall outside the new-RLE width range
+/// `8..=32767`, or when matching a legacy fixture exactly).
+pub fn encode_hdr_with_rle(image: &HdrImage, rle: RleMode) -> Result<Vec<u8>> {
     let w = image.width as usize;
     let h = image.height as usize;
     if image.pixels.len() != w * h * 3 {
@@ -150,15 +171,18 @@ pub fn encode_hdr(image: &HdrImage) -> Result<Vec<u8>> {
             "HDR encoder: pixels length doesn't match width*height*3",
         ));
     }
-    if !(8..=32767).contains(&w) {
+    if w == 0 || h == 0 {
+        return Err(Error::invalid("HDR encoder: zero dimension"));
+    }
+    if rle == RleMode::New && !(8..=32767).contains(&w) {
         return Err(Error::unsupported(format!(
-            "HDR encoder: width {w} outside supported new-RLE range 8..=32767"
+            "HDR encoder: width {w} outside supported new-RLE range 8..=32767 (try RleMode::Old)"
         )));
     }
     let mut out = Vec::with_capacity(32 + w * h * 4);
     write_header(&mut out, &image.header);
     write_resolution(&mut out, w, h);
-    write_pixel_rows(&mut out, w, h, &image.pixels)?;
+    write_pixel_rows(&mut out, w, h, &image.pixels, rle)?;
     Ok(out)
 }
 
@@ -211,7 +235,13 @@ fn write_resolution(out: &mut Vec<u8>, width: usize, height: usize) {
     out.extend_from_slice(format!("-Y {height} +X {width}\n").as_bytes());
 }
 
-fn write_pixel_rows(out: &mut Vec<u8>, width: usize, height: usize, pixels: &[f32]) -> Result<()> {
+fn write_pixel_rows(
+    out: &mut Vec<u8>,
+    width: usize,
+    height: usize,
+    pixels: &[f32],
+    rle: RleMode,
+) -> Result<()> {
     // For each scanline, build the four channel buffers from the
     // shared-exponent pixel encoding then RLE-code them.
     let mut channels: [Vec<u8>; 4] = [
@@ -229,7 +259,10 @@ fn write_pixel_rows(out: &mut Vec<u8>, width: usize, height: usize, pixels: &[f3
             channels[2][x] = rgbe[2];
             channels[3][x] = rgbe[3];
         }
-        encode_scanline(&channels, width, out)?;
+        match rle {
+            RleMode::New => encode_scanline(&channels, width, out)?,
+            RleMode::Old => encode_scanline_old_rle(&channels, width, out)?,
+        }
     }
     Ok(())
 }

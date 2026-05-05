@@ -40,6 +40,8 @@ pub mod image;
 pub mod registry;
 pub mod rgbe;
 pub mod rle;
+pub mod tonemap;
+pub mod xyz;
 
 /// Codec id for HDR image frames.
 pub const CODEC_ID_STR: &str = "hdr";
@@ -47,11 +49,16 @@ pub const CODEC_ID_STR: &str = "hdr";
 pub use decoder::parse_hdr;
 #[cfg(feature = "registry")]
 pub use decoder::parse_hdr_videoframe;
-pub use encoder::{encode_hdr, encode_hdr_rgb96f};
+pub use encoder::{encode_hdr, encode_hdr_rgb96f, encode_hdr_with_rle, RleMode};
 pub use error::{HdrError, Result};
 pub use header::{AxisSign, HdrFormat, HdrHeader};
 pub use image::{HdrImage, HdrPixelFormat};
 pub use rgbe::{rgb_to_rgbe, rgbe_to_rgb};
+pub use tonemap::{tone_map, ToneMap};
+pub use xyz::{
+    convert_image_rgb_to_xyz, convert_image_xyz_to_rgb, rgb_to_xyz, rgb_to_xyz_matrix, xyz_to_rgb,
+    xyz_to_rgb_matrix, RgbColorSpace,
+};
 
 #[cfg(feature = "registry")]
 pub use registry::{register, register_codecs, register_containers};

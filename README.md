@@ -17,7 +17,7 @@ Clean-room implementation against the published format documentation
 Radiance source / `image` crate's `hdr` submodule / Greg Ward's
 reference C code consulted.
 
-## Coverage (round 1)
+## Coverage (round 2)
 
 | Feature                      | Read | Write |
 |------------------------------|:----:|:-----:|
@@ -25,10 +25,17 @@ reference C code consulted.
 | `KEY=VALUE` header records   |  Y   |   Y   |
 | All 8 axis-flag combinations |  Y   | `-Y H +X W` only |
 | 32-bit_rle_rgbe pixels       |  Y   |   Y   |
-| 32-bit_rle_xyze pixels       |  Y   |   Y (no colour conversion) |
+| 32-bit_rle_xyze pixels       |  Y   |   Y (with helpers in `xyz`) |
 | New RLE (`0x02 0x02 hi lo`)  |  Y   |   Y   |
-| Old RLE (sentinel pixels)    |  Y   |   N   |
+| Old RLE (sentinel pixels)    |  Y   |   Y (`RleMode::Old`) |
 | CRLF line endings            |  Y   |   N   |
+| XYZE ↔ RGB (sRGB / Radiance) |  -   | helpers |
+| Tone-mapping (linear / gamma / Reinhard / ACES) | - | helpers |
+
+Cross-validated against ImageMagick 7's HDR codec (encoder output is
+decodable by `magick`, ImageMagick-written `.hdr` files round-trip
+through our decoder, XYZE↔RGB matrix tracks ImageMagick's chroma
+adaptation within the format's shared-exponent precision).
 
 ## Standalone vs registry-integrated
 
