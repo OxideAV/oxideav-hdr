@@ -77,6 +77,81 @@ impl AxisSign {
     }
 }
 
+/// CIE chromaticity coordinates carried in a `PRIMARIES=` record.
+///
+/// Radiance's `PRIMARIES` header tag is eight space-separated floats:
+/// `Rx Ry Gx Gy Bx By Wx Wy`. Each `(x, y)` is the CIE 1931 xy
+/// chromaticity for one of the three primaries or the reference white.
+/// The two missing components are `Rz = 1 - Rx - Ry`, …; full XYZ
+/// values follow by post-scaling the primaries onto the white point
+/// (the construction in BT.709 §3 / IEC 61966-2-1 Annex C).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Primaries {
+    /// `(x, y)` chromaticity of the red primary.
+    pub red: (f32, f32),
+    /// `(x, y)` chromaticity of the green primary.
+    pub green: (f32, f32),
+    /// `(x, y)` chromaticity of the blue primary.
+    pub blue: (f32, f32),
+    /// `(x, y)` chromaticity of the reference white point.
+    pub white: (f32, f32),
+}
+
+impl Primaries {
+    /// sRGB / Rec. 709 primaries with a D65 reference white, as
+    /// standardised in IEC 61966-2-1 Annex C / BT.709-6 §3.
+    pub const SRGB: Self = Self {
+        red: (0.640, 0.330),
+        green: (0.300, 0.600),
+        blue: (0.150, 0.060),
+        white: (0.3127, 0.3290),
+    };
+
+    /// Greg Ward's original Radiance RGB primaries with an equal-energy
+    /// (E) reference white. These are the values the reference
+    /// `ra_xyze` tool uses when a `PRIMARIES=` record is absent.
+    pub const RADIANCE: Self = Self {
+        red: (0.640, 0.330),
+        green: (0.290, 0.600),
+        blue: (0.150, 0.060),
+        white: (1.0 / 3.0, 1.0 / 3.0),
+    };
+
+    /// Format as the eight-float space-separated string the on-disk
+    /// `PRIMARIES=` record uses.
+    pub fn to_record_string(&self) -> String {
+        format!(
+            "{} {} {} {} {} {} {} {}",
+            self.red.0,
+            self.red.1,
+            self.green.0,
+            self.green.1,
+            self.blue.0,
+            self.blue.1,
+            self.white.0,
+            self.white.1,
+        )
+    }
+
+    /// Parse the eight-float value of a `PRIMARIES=` record. Returns
+    /// `None` if the record doesn't have exactly eight floats.
+    pub fn from_record_str(value: &str) -> Option<Self> {
+        let parts: Vec<f32> = value
+            .split_whitespace()
+            .filter_map(|t| t.parse::<f32>().ok())
+            .collect();
+        if parts.len() != 8 {
+            return None;
+        }
+        Some(Self {
+            red: (parts[0], parts[1]),
+            green: (parts[2], parts[3]),
+            blue: (parts[4], parts[5]),
+            white: (parts[6], parts[7]),
+        })
+    }
+}
+
 /// Header carried inside [`crate::HdrImage`]. Everything optional has
 /// `Option<…>` so `Default` produces something writable.
 #[derive(Debug, Clone, PartialEq)]
@@ -92,6 +167,16 @@ pub struct HdrHeader {
     pub software: Option<String>,
     /// `PIXASPECT=` value.
     pub pixaspect: Option<f32>,
+    /// `COLORCORR=` three-float per-channel correction. The Radiance
+    /// reference manual defines it as a multiplicative scale applied to
+    /// the float channels on the way out of decode (separately from
+    /// EXPOSURE, which it does not stack into); we parse and round-trip
+    /// it but leave honouring it to the tone-mapper / display path.
+    pub colorcorr: Option<[f32; 3]>,
+    /// `PRIMARIES=` chromaticity coordinates. Defaults to `None`, in
+    /// which case consumers should assume Radiance's default RGB
+    /// primaries.
+    pub primaries: Option<Primaries>,
     /// Free-form `KEY=VALUE` records that didn't match a typed slot
     /// above. Preserved in the order they were read.
     pub other: Vec<(String, String)>,
@@ -118,11 +203,33 @@ impl Default for HdrHeader {
             gamma: None,
             software: None,
             pixaspect: None,
+            colorcorr: None,
+            primaries: None,
             other: Vec::new(),
             comments: Vec::new(),
             y_sign: AxisSign::Decreasing,
             x_sign: AxisSign::Increasing,
             x_first: false,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn primaries_record_string_roundtrips() {
+        let p = Primaries::SRGB;
+        let s = p.to_record_string();
+        let back = Primaries::from_record_str(&s).unwrap();
+        assert!((back.red.0 - p.red.0).abs() < 1e-5);
+        assert!((back.green.1 - p.green.1).abs() < 1e-5);
+        assert!((back.white.0 - p.white.0).abs() < 1e-5);
+    }
+
+    #[test]
+    fn primaries_rejects_short_record() {
+        assert!(Primaries::from_record_str("0.64 0.33 0.30 0.60").is_none());
     }
 }

@@ -11,7 +11,7 @@
 //! surface and tone-maps each pixel into Rgb24 at the boundary.
 
 use crate::error::{HdrError as Error, Result};
-use crate::header::{AxisSign, HdrFormat, HdrHeader};
+use crate::header::{AxisSign, HdrFormat, HdrHeader, Primaries};
 use crate::image::{HdrImage, HdrPixelFormat};
 use crate::rgbe::rgbe_to_rgb;
 use crate::rle::decode_scanline;
@@ -183,6 +183,28 @@ fn parse_header(input: &[u8], cursor: &mut usize) -> Result<HdrHeader> {
             }
             "SOFTWARE" => {
                 header.software = Some(value.to_owned());
+            }
+            "COLORCORR" => {
+                let parts: Vec<&str> = value.split_whitespace().collect();
+                if parts.len() != 3 {
+                    return Err(Error::invalid("HDR: COLORCORR must have 3 floats"));
+                }
+                let r: f32 = parts[0]
+                    .parse()
+                    .map_err(|_| Error::invalid("HDR: invalid COLORCORR red"))?;
+                let g: f32 = parts[1]
+                    .parse()
+                    .map_err(|_| Error::invalid("HDR: invalid COLORCORR green"))?;
+                let b: f32 = parts[2]
+                    .parse()
+                    .map_err(|_| Error::invalid("HDR: invalid COLORCORR blue"))?;
+                header.colorcorr = Some([r, g, b]);
+            }
+            "PRIMARIES" => {
+                header.primaries = Some(
+                    Primaries::from_record_str(value)
+                        .ok_or_else(|| Error::invalid("HDR: PRIMARIES must have 8 floats"))?,
+                );
             }
             _ => {
                 header.other.push((key.to_owned(), value.to_owned()));

@@ -3,20 +3,22 @@
 //! [`HdrHeader::other`]), the resolution line, and the new-RLE pixel
 //! rows.
 //!
-//! Always writes top-down rows (`-Y H +X W`) regardless of the
-//! `HdrHeader::y_sign` / `HdrHeader::x_sign` / `HdrHeader::x_first`
-//! fields. Those exist on the round-trip side only — the encoder
-//! ignores them so we never accidentally emit one of the rare
-//! axis-flag combinations a careless decoder might mishandle.
+//! The encoder honours [`HdrHeader::y_sign`] / [`HdrHeader::x_sign`] /
+//! [`HdrHeader::x_first`]. The pixel buffer is always interpreted as
+//! top-down `(y, x)` row-major; when the requested axis flags differ
+//! from that canonical orientation the encoder mirrors / transposes the
+//! buffer on its way out so the on-disk file matches the requested
+//! resolution-line orientation. Defaults are
+//! `y_sign = Decreasing, x_sign = Increasing, x_first = false`, i.e.
+//! the canonical `-Y H +X W` form.
 //!
-//! Width must be in the range `8..=32767` (the new-RLE marker can't
-//! address rows outside that range). Encoding a wider image is
-//! reported as `HdrError::Unsupported`; oxideav-hdr round 2+ will
-//! grow a per-row plain-pixel fallback for the few hundred pixels
-//! per side wide enough to need it.
+//! For [`RleMode::New`] the width must be in the range `8..=32767`
+//! (the new-RLE marker can't address rows outside that range);
+//! [`RleMode::Auto`] picks new-RLE for widths in that range and falls
+//! back to [`RleMode::Old`] for narrower / wider images.
 
 use crate::error::{HdrError as Error, Result};
-use crate::header::HdrHeader;
+use crate::header::{AxisSign, HdrHeader};
 use crate::image::{HdrImage, HdrPixelFormat};
 use crate::rgbe::rgb_to_rgbe;
 use crate::rle::{encode_scanline, encode_scanline_old_rle};
@@ -30,6 +32,11 @@ pub enum RleMode {
     /// Pre-1991 old-RLE: per-pixel literals interleaved with chained
     /// `(1, 1, 1, n)` sentinel runs. No width restriction.
     Old,
+    /// Heuristic: pick [`RleMode::New`] when the image width falls in
+    /// `8..=32767` (the new-RLE marker's addressable range), otherwise
+    /// fall back to [`RleMode::Old`]. The encoder never errors on
+    /// out-of-range widths in `Auto` mode.
+    Auto,
 }
 
 #[cfg(feature = "registry")]
@@ -174,15 +181,39 @@ pub fn encode_hdr_with_rle(image: &HdrImage, rle: RleMode) -> Result<Vec<u8>> {
     if w == 0 || h == 0 {
         return Err(Error::invalid("HDR encoder: zero dimension"));
     }
-    if rle == RleMode::New && !(8..=32767).contains(&w) {
+    let effective_rle = match rle {
+        RleMode::Auto => {
+            if (8..=32767).contains(&w) {
+                RleMode::New
+            } else {
+                RleMode::Old
+            }
+        }
+        other => other,
+    };
+    if effective_rle == RleMode::New && !(8..=32767).contains(&w) {
         return Err(Error::unsupported(format!(
-            "HDR encoder: width {w} outside supported new-RLE range 8..=32767 (try RleMode::Old)"
+            "HDR encoder: width {w} outside supported new-RLE range 8..=32767 (try RleMode::Old or RleMode::Auto)"
         )));
     }
+    // Reorder the canonical top-down (y, x) buffer into the layout
+    // implied by the header's axis-sign flags before encoding. The
+    // decoder applies the inverse on the way back, so a header set in
+    // user code round-trips losslessly for the four Y-first axis-flag
+    // combinations.
+    //
+    // The four X-first orderings (`±X W ±Y H`) are not honoured on the
+    // write path yet — they swap the on-disk dimensions vs the
+    // canonical buffer and add a transpose step the framework boundary
+    // doesn't need today. The encoder canonicalises any such request
+    // back to Y-first before writing so the produced file is still
+    // valid; round-tripping a synthetic `x_first=true` flag therefore
+    // loses that single bit of header information.
+    let oriented = reorient_for_axis_flags(&image.pixels, w, h, &image.header);
     let mut out = Vec::with_capacity(32 + w * h * 4);
     write_header(&mut out, &image.header);
-    write_resolution(&mut out, w, h);
-    write_pixel_rows(&mut out, w, h, &image.pixels, rle)?;
+    write_resolution(&mut out, w, h, &image.header);
+    write_pixel_rows(&mut out, w, h, &oriented, effective_rle)?;
     Ok(out)
 }
 
@@ -216,6 +247,12 @@ fn write_header(out: &mut Vec<u8>, header: &HdrHeader) {
     if let Some(p) = header.pixaspect {
         out.extend_from_slice(format!("PIXASPECT={p}\n").as_bytes());
     }
+    if let Some([r, g, b]) = header.colorcorr {
+        out.extend_from_slice(format!("COLORCORR={r} {g} {b}\n").as_bytes());
+    }
+    if let Some(p) = header.primaries {
+        out.extend_from_slice(format!("PRIMARIES={}\n", p.to_record_string()).as_bytes());
+    }
     if let Some(s) = &header.software {
         out.extend_from_slice(format!("SOFTWARE={s}\n").as_bytes());
     }
@@ -230,9 +267,50 @@ fn write_header(out: &mut Vec<u8>, header: &HdrHeader) {
     out.push(b'\n');
 }
 
-fn write_resolution(out: &mut Vec<u8>, width: usize, height: usize) {
-    // Always emit the canonical `-Y H +X W` form.
-    out.extend_from_slice(format!("-Y {height} +X {width}\n").as_bytes());
+fn write_resolution(out: &mut Vec<u8>, width: usize, height: usize, header: &HdrHeader) {
+    let y_flag = match header.y_sign {
+        AxisSign::Decreasing => "-Y",
+        AxisSign::Increasing => "+Y",
+    };
+    let x_flag = match header.x_sign {
+        AxisSign::Decreasing => "-X",
+        AxisSign::Increasing => "+X",
+    };
+    // We canonicalise X-first requests back to Y-first; see the
+    // `encode_hdr_with_rle` doc comment.
+    out.extend_from_slice(format!("{y_flag} {height} {x_flag} {width}\n").as_bytes());
+}
+
+/// Reorder a canonical top-down `(y, x)` row-major float buffer into
+/// the on-disk layout implied by `header.y_sign` / `header.x_sign`.
+///
+/// X-first requests are canonicalised back to Y-first by this routine
+/// (the resulting buffer is the same one we'd emit for the equivalent
+/// Y-first header); see the `encode_hdr_with_rle` doc comment.
+fn reorient_for_axis_flags(
+    pixels: &[f32],
+    width: usize,
+    height: usize,
+    header: &HdrHeader,
+) -> Vec<f32> {
+    let flip_y = header.y_sign == AxisSign::Increasing;
+    let flip_x = header.x_sign == AxisSign::Decreasing;
+    if !flip_x && !flip_y {
+        return pixels.to_vec();
+    }
+    let mut m = vec![0.0_f32; pixels.len()];
+    for y in 0..height {
+        let src_y = if flip_y { height - 1 - y } else { y };
+        for x in 0..width {
+            let src_x = if flip_x { width - 1 - x } else { x };
+            let src = (src_y * width + src_x) * 3;
+            let dst = (y * width + x) * 3;
+            m[dst] = pixels[src];
+            m[dst + 1] = pixels[src + 1];
+            m[dst + 2] = pixels[src + 2];
+        }
+    }
+    m
 }
 
 fn write_pixel_rows(
@@ -261,7 +339,7 @@ fn write_pixel_rows(
         }
         match rle {
             RleMode::New => encode_scanline(&channels, width, out)?,
-            RleMode::Old => encode_scanline_old_rle(&channels, width, out)?,
+            RleMode::Old | RleMode::Auto => encode_scanline_old_rle(&channels, width, out)?,
         }
     }
     Ok(())

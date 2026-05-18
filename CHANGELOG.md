@@ -9,6 +9,48 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Round 3: typed `HdrHeader::colorcorr` slot for the Radiance
+  `COLORCORR=R G B` per-channel correction record. Decoder parses
+  three floats, encoder writes them, round-trip preserves the value.
+- Round 3: typed `HdrHeader::primaries` slot backed by a new
+  `Primaries` struct holding the eight CIE xy chromaticity floats
+  `Rx Ry Gx Gy Bx By Wx Wy` that the Radiance `PRIMARIES=` record
+  carries. `Primaries::SRGB` and `Primaries::RADIANCE` constants
+  match the IEC 61966-2-1 Annex C and Greg Ward equal-energy
+  primaries respectively.
+- Round 3: encoder honours `HdrHeader::y_sign` and `HdrHeader::x_sign`
+  for the four Y-first axis-flag orderings (`-Y H +X W`,
+  `+Y H +X W`, `-Y H -X W`, `+Y H -X W`). The four X-first
+  orderings are canonicalised back to Y-first on write — the produced
+  file is still valid but loses that single bit of header
+  information across the round-trip. Doc comment in
+  `encode_hdr_with_rle` spells this out.
+- Round 3: `RleMode::Auto` — encoder picks `RleMode::New` for widths
+  in the new-RLE range `8..=32767` and falls back to `RleMode::Old`
+  for narrower or wider images. Callers that don't want to think
+  about the marker's addressable range can pass `Auto` instead of
+  juggling explicit `New` / `Old`.
+- Round 3: three new tone-mapping operators in
+  `oxideav_hdr::tonemap`:
+  - `ReinhardExtended` — Reinhard's modified operator
+    `(v * (1 + v/W²)) / (1 + v)` with an explicit `white_point`.
+    Lets very-bright samples actually reach display white (per
+    Reinhard et al. 2002 §3.1) where the unmodified Reinhard
+    asymptotes from below.
+  - `Hable` — John Hable's "Uncharted 2" filmic curve
+    (GDC 2010 derivation): five-knot rational function with a
+    `linear_white` normalisation. Designed for game-style filmic
+    response with crisp shadows and rolled-off highlights.
+  - `Drago` — Drago / Myszkowski / Annen / Chiba EUROGRAPHICS 2003
+    adaptive logarithmic operator with a `scene_max` and `bias`
+    parameter. Maps wide-range scenes perceptually uniformly across
+    orders of magnitude.
+- Round 3: tests cover all three new operators plus the new
+  `ReinhardExtended` white-point handling, the new axis-flag
+  honour, and the `RleMode::Auto` heuristic.
+
+### Round 2 additions (still in `[Unreleased]` window)
+
 - Round 2: old-RLE encoder (`encode_scanline_old_rle`) — the
   pre-1991 per-pixel literal + chained `(1, 1, 1, n)` sentinel-run
   format. Exposed via `encode_hdr_with_rle(image, RleMode::Old)` for

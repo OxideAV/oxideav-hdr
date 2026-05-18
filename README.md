@@ -17,20 +17,24 @@ Clean-room implementation against the published format documentation
 Radiance source / `image` crate's `hdr` submodule / Greg Ward's
 reference C code consulted.
 
-## Coverage (round 2)
+## Coverage (round 3)
 
 | Feature                      | Read | Write |
 |------------------------------|:----:|:-----:|
 | `#?RADIANCE` / `#?RGBE` magic|  Y   |   Y   |
 | `KEY=VALUE` header records   |  Y   |   Y   |
-| All 8 axis-flag combinations |  Y   | `-Y H +X W` only |
+| `EXPOSURE` / `GAMMA` / `PIXASPECT` / `SOFTWARE` | Y | Y |
+| `COLORCORR` (3-float)        |  Y   |   Y   |
+| `PRIMARIES` (8-float chromaticity) | Y |   Y   |
+| All 8 axis-flag combinations |  Y   | 4 (Y-first; X-first canonicalised) |
 | 32-bit_rle_rgbe pixels       |  Y   |   Y   |
 | 32-bit_rle_xyze pixels       |  Y   |   Y (with helpers in `xyz`) |
 | New RLE (`0x02 0x02 hi lo`)  |  Y   |   Y   |
 | Old RLE (sentinel pixels)    |  Y   |   Y (`RleMode::Old`) |
+| Auto-RLE (width heuristic)   |  -   |   Y (`RleMode::Auto`) |
 | CRLF line endings            |  Y   |   N   |
 | XYZE ↔ RGB (sRGB / Radiance) |  -   | helpers |
-| Tone-mapping (linear / gamma / Reinhard / ACES) | - | helpers |
+| Tone-mapping (Linear / Gamma / Reinhard / ReinhardExtended / Hable / Drago / ACES) | - | helpers |
 
 Cross-validated against ImageMagick 7's HDR codec (encoder output is
 decodable by `magick`, ImageMagick-written `.hdr` files round-trip

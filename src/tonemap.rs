@@ -15,6 +15,21 @@
 //!   a gamma OETF; the historical "viewer" tone-map for `.hdr`.
 //! * **Reinhard** — `v / (1 + v)` per-channel after exposure scaling.
 //!   The classic Reinhard et al. 2002 global operator.
+//! * **ReinhardExtended** — Reinhard's modified operator
+//!   `v * (1 + v/Lwhite^2) / (1 + v)`, which lets very-bright samples
+//!   actually reach 1.0 instead of asymptoting to it. From Reinhard,
+//!   Stark, Shirley, Ferwerda, "Photographic Tone Reproduction for
+//!   Digital Images" (ACM ToG 2002) §3.1.
+//! * **Hable** — John Hable's "Uncharted 2" filmic curve, derivation
+//!   published at GDC 2010 ("Uncharted 2: HDR Lighting"). Five-knot
+//!   rational function with a `linear_white` normalisation. Designed
+//!   for game-style filmic response with crisp shadows and rolled-off
+//!   highlights.
+//! * **Drago** — Drago, Myszkowski, Annen, Chiba, "Adaptive Logarithmic
+//!   Mapping For Displaying High Contrast Scenes" (EUROGRAPHICS 2003).
+//!   Bias-controlled `log_{base(Lw_max)}` mapping that adapts the
+//!   compression to the scene's maximum luminance for a perceptually
+//!   uniform response across orders of magnitude.
 //! * **ACES** — the public-domain Krzysztof Narkowicz fit to the ACES
 //!   reference rendering transform (Hable 2017 derivation, blog post
 //!   `knarkowicz.wordpress.com`). Designed for film-look highlight
@@ -47,6 +62,34 @@ pub enum ToneMap {
     /// Reinhard et al. 2002 global operator: `(v*e) / (1 + v*e)`
     /// per channel, then sRGB gamma encoding.
     Reinhard { exposure: f32 },
+    /// Modified Reinhard with a `white_point` saturation — `(v *
+    /// (1 + v/white²)) / (1 + v)`. Lets very-bright samples actually
+    /// reach 1.0 (where the unmodified Reinhard asymptotes from below).
+    ReinhardExtended {
+        exposure: f32,
+        /// Luminance value that maps to 1.0 (display white).
+        white_point: f32,
+    },
+    /// John Hable's "Uncharted 2" filmic curve, GDC 2010. Five-knot
+    /// rational function with a `linear_white` normalisation.
+    Hable {
+        exposure: f32,
+        /// Brightness of the white point used to normalise the curve.
+        /// Hable's GDC 2010 default is `11.2`.
+        linear_white: f32,
+    },
+    /// Drago, Myszkowski, Annen, Chiba (EUROGRAPHICS 2003) adaptive
+    /// logarithmic operator. The `bias` parameter (0..=1) controls
+    /// shadow/highlight balance; Drago's recommended default is `0.85`.
+    Drago {
+        exposure: f32,
+        /// Maximum luminance in the scene (used as the log base);
+        /// callers usually estimate this from a per-image pass.
+        scene_max: f32,
+        /// Bias parameter `0..=1`. Higher values brighten shadows;
+        /// lower values protect highlights. `0.85` is Drago's default.
+        bias: f32,
+    },
     /// Krzysztof Narkowicz's polynomial ACES fit, then sRGB gamma.
     /// Designed for film-look highlight roll-off; the most common
     /// "looks-good-out-of-the-box" choice for HDR previews.
@@ -103,6 +146,38 @@ pub fn apply(op: ToneMap, rgb: [f32; 3]) -> [f32; 3] {
             let b = reinhard(rgb[2] * exposure);
             [srgb_oetf(r), srgb_oetf(g), srgb_oetf(b)]
         }
+        ToneMap::ReinhardExtended {
+            exposure,
+            white_point,
+        } => {
+            let w2 = (white_point * white_point).max(1e-6);
+            let r = reinhard_extended(rgb[0] * exposure, w2);
+            let g = reinhard_extended(rgb[1] * exposure, w2);
+            let b = reinhard_extended(rgb[2] * exposure, w2);
+            [srgb_oetf(r), srgb_oetf(g), srgb_oetf(b)]
+        }
+        ToneMap::Hable {
+            exposure,
+            linear_white,
+        } => {
+            // Apply curve to each channel, then normalise by the curve
+            // value at `linear_white` so display white maps to 1.0.
+            let denom = hable_curve(linear_white).max(1e-6);
+            let r = hable_curve(rgb[0] * exposure) / denom;
+            let g = hable_curve(rgb[1] * exposure) / denom;
+            let b = hable_curve(rgb[2] * exposure) / denom;
+            [srgb_oetf(r), srgb_oetf(g), srgb_oetf(b)]
+        }
+        ToneMap::Drago {
+            exposure,
+            scene_max,
+            bias,
+        } => {
+            let r = drago(rgb[0] * exposure, scene_max * exposure, bias);
+            let g = drago(rgb[1] * exposure, scene_max * exposure, bias);
+            let b = drago(rgb[2] * exposure, scene_max * exposure, bias);
+            [srgb_oetf(r), srgb_oetf(g), srgb_oetf(b)]
+        }
         ToneMap::Aces { exposure } => {
             let r = aces_narkowicz(rgb[0] * exposure);
             let g = aces_narkowicz(rgb[1] * exposure);
@@ -132,6 +207,74 @@ fn quantise(v: f32) -> u8 {
 fn reinhard(v: f32) -> f32 {
     let v = if v.is_finite() && v > 0.0 { v } else { 0.0 };
     v / (1.0 + v)
+}
+
+/// Reinhard's modified ("extended") operator with an explicit white
+/// point: `v * (1 + v/W²) / (1 + v)` with `W² = white_point²` already
+/// squared by the caller. Maps `v = white_point` exactly onto 1.0
+/// instead of asymptoting toward it.
+#[inline]
+fn reinhard_extended(v: f32, white_sq: f32) -> f32 {
+    let v = if v.is_finite() && v > 0.0 { v } else { 0.0 };
+    let num = v * (1.0 + v / white_sq);
+    let den = 1.0 + v;
+    clamp01(num / den)
+}
+
+/// John Hable's "Uncharted 2" filmic curve, GDC 2010. The five-knot
+/// rational fit:
+/// ```text
+/// f(x) = ((x * (A*x + C*B) + D*E) / (x * (A*x + B) + D*F)) - E/F
+/// ```
+/// with `A=0.15, B=0.50, C=0.10, D=0.20, E=0.02, F=0.30`. Apply once
+/// to the linear scene value, once to the `linear_white` reference,
+/// then divide so display white lands at 1.0 (the caller does the
+/// normalisation).
+#[inline]
+fn hable_curve(x: f32) -> f32 {
+    let x = if x.is_finite() && x > 0.0 { x } else { 0.0 };
+    let a = 0.15_f32;
+    let b = 0.50;
+    let c = 0.10;
+    let d = 0.20;
+    let e = 0.02;
+    let f = 0.30;
+    ((x * (a * x + c * b) + d * e) / (x * (a * x + b) + d * f)) - e / f
+}
+
+/// Drago, Myszkowski, Annen, Chiba (EUROGRAPHICS 2003) adaptive
+/// logarithmic operator §3:
+/// ```text
+/// Ld = (Ldmax * 0.01 / log10(1 + Lwmax))
+///      * log(1 + Lw)
+///      / log(2 + 8 * ((Lw/Lwmax)^(log(bias)/log(0.5))))
+/// ```
+/// We normalise out the `(Ldmax * 0.01)` part so the operator's output
+/// already sits in `[0, 1]` (display-referred). `scene_max` is `Lwmax`;
+/// `bias` defaults to Drago's recommended `0.85`. The paper's `log`s
+/// are natural log; we keep them so.
+#[inline]
+fn drago(v: f32, scene_max: f32, bias: f32) -> f32 {
+    let v = if v.is_finite() && v > 0.0 { v } else { 0.0 };
+    let lwmax = scene_max.max(1e-6);
+    // Clamp bias into the open (0, 1) interval — log(0) and log(1) both
+    // degenerate the curve.
+    let bias = bias.clamp(0.001, 0.999);
+    let log_bias = bias.ln() / 0.5_f32.ln();
+    let log_v = (1.0 + v).ln();
+    let ratio = (v / lwmax).clamp(0.0, 1.0);
+    let log_denom = (2.0 + 8.0 * ratio.powf(log_bias)).ln();
+    // Normalisation: the `0.01 * Ldmax / log10(1 + Lwmax)` prefactor in
+    // the paper sets the absolute display luminance; for an LDR
+    // tone-mapper we want `Ld(Lwmax) ≈ 1`. With the prefactor folded
+    // into a per-image scale we end up with:
+    //   Ld(v) / Ld(Lwmax) = (log_v / log_denom) / (log_max / log_max_denom)
+    // where the *_max variants are evaluated at `v = Lwmax`.
+    let log_max = (1.0 + lwmax).ln();
+    let log_max_denom = (2.0 + 8.0_f32 * 1.0_f32.powf(log_bias)).ln();
+    let raw = log_v / log_denom;
+    let raw_max = log_max / log_max_denom;
+    clamp01(raw / raw_max.max(1e-6))
 }
 
 /// `clamp01(v)^(1/gamma)` — the gamma-only branch's per-channel call.
@@ -264,6 +407,19 @@ mod tests {
                 gamma: 2.2,
             },
             ToneMap::Reinhard { exposure: 1.0 },
+            ToneMap::ReinhardExtended {
+                exposure: 1.0,
+                white_point: 4.0,
+            },
+            ToneMap::Hable {
+                exposure: 1.0,
+                linear_white: 11.2,
+            },
+            ToneMap::Drago {
+                exposure: 1.0,
+                scene_max: 1.0,
+                bias: 0.85,
+            },
             ToneMap::Aces { exposure: 1.0 },
         ] {
             let out = tone_map(&img, op);
@@ -272,6 +428,74 @@ mod tests {
             assert_eq!(out[0], 0, "{op:?} negative");
             assert_eq!(out[1], 0, "{op:?} NaN");
             assert!(out[2] == 255 || out[2] == 0, "{op:?} +INF -> {}", out[2]);
+        }
+    }
+
+    #[test]
+    fn reinhard_extended_reaches_white_at_white_point() {
+        // With white_point = 4.0, a sample at 4.0 should land at 1.0
+        // (display white) — that's the whole point of the extended
+        // variant relative to the unmodified one.
+        let img = one_pixel([4.0, 4.0, 4.0]);
+        let out = tone_map(
+            &img,
+            ToneMap::ReinhardExtended {
+                exposure: 1.0,
+                white_point: 4.0,
+            },
+        );
+        for &v in &out {
+            assert_eq!(v, 255);
+        }
+    }
+
+    #[test]
+    fn hable_compresses_highlights_monotonically() {
+        // Curve should be monotonically increasing in x and never NaN.
+        let xs = [0.0_f32, 0.1, 0.5, 1.0, 2.0, 5.0, 20.0, 200.0];
+        let mut last = -1.0;
+        for &x in &xs {
+            let img = one_pixel([x, x, x]);
+            let out = tone_map(
+                &img,
+                ToneMap::Hable {
+                    exposure: 1.0,
+                    linear_white: 11.2,
+                },
+            );
+            let v = out[0] as f32;
+            assert!(v >= last - 1e-3, "non-monotonic at x={x}: {last} → {v}");
+            last = v;
+        }
+    }
+
+    #[test]
+    fn drago_handles_wide_range_and_normalises_to_white() {
+        // scene_max should map (approximately) to display white.
+        let img = one_pixel([100.0, 100.0, 100.0]);
+        let out = tone_map(
+            &img,
+            ToneMap::Drago {
+                exposure: 1.0,
+                scene_max: 100.0,
+                bias: 0.85,
+            },
+        );
+        for &v in &out {
+            assert!(v > 220, "scene_max should land near white, got {v}");
+        }
+        // A mid-range sample should sit comfortably between 0 and 255.
+        let img = one_pixel([1.0, 1.0, 1.0]);
+        let out = tone_map(
+            &img,
+            ToneMap::Drago {
+                exposure: 1.0,
+                scene_max: 100.0,
+                bias: 0.85,
+            },
+        );
+        for &v in &out {
+            assert!(v > 20 && v < 230, "mid-range Drago out of band: {v}");
         }
     }
 

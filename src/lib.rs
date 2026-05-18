@@ -51,7 +51,7 @@ pub use decoder::parse_hdr;
 pub use decoder::parse_hdr_videoframe;
 pub use encoder::{encode_hdr, encode_hdr_rgb96f, encode_hdr_with_rle, RleMode};
 pub use error::{HdrError, Result};
-pub use header::{AxisSign, HdrFormat, HdrHeader};
+pub use header::{AxisSign, HdrFormat, HdrHeader, Primaries};
 pub use image::{HdrImage, HdrPixelFormat};
 pub use rgbe::{rgb_to_rgbe, rgbe_to_rgb};
 pub use tonemap::{tone_map, ToneMap};
