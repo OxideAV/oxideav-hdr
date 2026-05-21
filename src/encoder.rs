@@ -10,7 +10,10 @@
 //! buffer on its way out so the on-disk file matches the requested
 //! resolution-line orientation. Defaults are
 //! `y_sign = Decreasing, x_sign = Increasing, x_first = false`, i.e.
-//! the canonical `-Y H +X W` form.
+//! the canonical `-Y H +X W` form. All eight axis-flag combinations are
+//! supported on both read and write; round-tripping any of them through
+//! [`encode_hdr`] + [`crate::parse_hdr`] reproduces the original
+//! buffer.
 //!
 //! For [`RleMode::New`] the width must be in the range `8..=32767`
 //! (the new-RLE marker can't address rows outside that range);
@@ -181,9 +184,26 @@ pub fn encode_hdr_with_rle(image: &HdrImage, rle: RleMode) -> Result<Vec<u8>> {
     if w == 0 || h == 0 {
         return Err(Error::invalid("HDR encoder: zero dimension"));
     }
+    // Reorder the canonical top-down (y, x) buffer into the layout
+    // implied by the header's axis-sign flags before encoding. The
+    // decoder applies the inverse on the way back, so any of the eight
+    // axis-flag combinations round-trips losslessly.
+    //
+    // For Y-first headers (`±Y H ±X W`) the on-disk scanline is one row
+    // of the canonical buffer and the only reordering is a vertical /
+    // horizontal mirror per the sign flags. For X-first headers
+    // (`±X W ±Y H`) each on-disk "scanline" is actually a column of the
+    // canonical buffer, so we transpose into (x, y) order first; the
+    // on-disk width then becomes `height` (the height-many original
+    // rows, now laid out one per output sample) and the on-disk height
+    // becomes `width`. The axis-sign flips apply after the transpose.
+    let (out_w, out_h, oriented) = reorient_for_axis_flags(&image.pixels, w, h, &image.header);
+    // The new-RLE marker addresses the *on-disk* scanline width, which
+    // differs from the canonical image width for X-first headers — apply
+    // the auto/strict check against `out_w` rather than `w`.
     let effective_rle = match rle {
         RleMode::Auto => {
-            if (8..=32767).contains(&w) {
+            if (8..=32767).contains(&out_w) {
                 RleMode::New
             } else {
                 RleMode::Old
@@ -191,29 +211,15 @@ pub fn encode_hdr_with_rle(image: &HdrImage, rle: RleMode) -> Result<Vec<u8>> {
         }
         other => other,
     };
-    if effective_rle == RleMode::New && !(8..=32767).contains(&w) {
+    if effective_rle == RleMode::New && !(8..=32767).contains(&out_w) {
         return Err(Error::unsupported(format!(
-            "HDR encoder: width {w} outside supported new-RLE range 8..=32767 (try RleMode::Old or RleMode::Auto)"
+            "HDR encoder: on-disk scanline width {out_w} outside supported new-RLE range 8..=32767 (try RleMode::Old or RleMode::Auto)"
         )));
     }
-    // Reorder the canonical top-down (y, x) buffer into the layout
-    // implied by the header's axis-sign flags before encoding. The
-    // decoder applies the inverse on the way back, so a header set in
-    // user code round-trips losslessly for the four Y-first axis-flag
-    // combinations.
-    //
-    // The four X-first orderings (`±X W ±Y H`) are not honoured on the
-    // write path yet — they swap the on-disk dimensions vs the
-    // canonical buffer and add a transpose step the framework boundary
-    // doesn't need today. The encoder canonicalises any such request
-    // back to Y-first before writing so the produced file is still
-    // valid; round-tripping a synthetic `x_first=true` flag therefore
-    // loses that single bit of header information.
-    let oriented = reorient_for_axis_flags(&image.pixels, w, h, &image.header);
-    let mut out = Vec::with_capacity(32 + w * h * 4);
+    let mut out = Vec::with_capacity(32 + out_w * out_h * 4);
     write_header(&mut out, &image.header);
-    write_resolution(&mut out, w, h, &image.header);
-    write_pixel_rows(&mut out, w, h, &oriented, effective_rle)?;
+    write_resolution(&mut out, out_w, out_h, &image.header);
+    write_pixel_rows(&mut out, out_w, out_h, &oriented, effective_rle)?;
     Ok(out)
 }
 
@@ -267,7 +273,7 @@ fn write_header(out: &mut Vec<u8>, header: &HdrHeader) {
     out.push(b'\n');
 }
 
-fn write_resolution(out: &mut Vec<u8>, width: usize, height: usize, header: &HdrHeader) {
+fn write_resolution(out: &mut Vec<u8>, out_width: usize, out_height: usize, header: &HdrHeader) {
     let y_flag = match header.y_sign {
         AxisSign::Decreasing => "-Y",
         AxisSign::Increasing => "+Y",
@@ -276,27 +282,66 @@ fn write_resolution(out: &mut Vec<u8>, width: usize, height: usize, header: &Hdr
         AxisSign::Decreasing => "-X",
         AxisSign::Increasing => "+X",
     };
-    // We canonicalise X-first requests back to Y-first; see the
-    // `encode_hdr_with_rle` doc comment.
-    out.extend_from_slice(format!("{y_flag} {height} {x_flag} {width}\n").as_bytes());
+    // The resolution line lists either `<Y_flag> H <X_flag> W` (when
+    // the on-disk scanline holds one row's worth of Y-pixels) or
+    // `<X_flag> W <Y_flag> H` (when the on-disk scanline holds one
+    // column's worth of X-pixels). In the X-first layout the `out_*`
+    // dimensions are already swapped by `reorient_for_axis_flags`, so
+    // `out_height` is the *image* width and vice versa.
+    if header.x_first {
+        // out_height = canonical width, out_width = canonical height.
+        out.extend_from_slice(format!("{x_flag} {out_height} {y_flag} {out_width}\n").as_bytes());
+    } else {
+        out.extend_from_slice(format!("{y_flag} {out_height} {x_flag} {out_width}\n").as_bytes());
+    }
 }
 
 /// Reorder a canonical top-down `(y, x)` row-major float buffer into
-/// the on-disk layout implied by `header.y_sign` / `header.x_sign`.
+/// the on-disk layout implied by `header.y_sign` / `header.x_sign` /
+/// `header.x_first`.
 ///
-/// X-first requests are canonicalised back to Y-first by this routine
-/// (the resulting buffer is the same one we'd emit for the equivalent
-/// Y-first header); see the `encode_hdr_with_rle` doc comment.
+/// Returns `(out_width, out_height, oriented_pixels)`. For Y-first
+/// headers the returned width/height match the input; for X-first
+/// headers they are swapped (each on-disk scanline is one column of
+/// the canonical buffer).
 fn reorient_for_axis_flags(
     pixels: &[f32],
     width: usize,
     height: usize,
     header: &HdrHeader,
-) -> Vec<f32> {
+) -> (usize, usize, Vec<f32>) {
     let flip_y = header.y_sign == AxisSign::Increasing;
     let flip_x = header.x_sign == AxisSign::Decreasing;
+
+    if header.x_first {
+        // Transpose into (x, y) row-major: each output row is a column
+        // of the canonical buffer. After transpose the on-disk width is
+        // the canonical `height` (one sample per original row) and the
+        // on-disk height is the canonical `width`.
+        let out_w = height;
+        let out_h = width;
+        let mut m = vec![0.0_f32; pixels.len()];
+        for ox in 0..width {
+            // `ox` is the canonical X column which becomes output row.
+            // Apply the X sign flip on the source-X side: if `flip_x`
+            // is set, the first on-disk "scanline" (output row index 0)
+            // should hold the canonical right-most column.
+            let src_x = if flip_x { width - 1 - ox } else { ox };
+            for oy in 0..height {
+                // `oy` is the canonical Y row which becomes output col.
+                let src_y = if flip_y { height - 1 - oy } else { oy };
+                let src = (src_y * width + src_x) * 3;
+                let dst = (ox * out_w + oy) * 3;
+                m[dst] = pixels[src];
+                m[dst + 1] = pixels[src + 1];
+                m[dst + 2] = pixels[src + 2];
+            }
+        }
+        return (out_w, out_h, m);
+    }
+
     if !flip_x && !flip_y {
-        return pixels.to_vec();
+        return (width, height, pixels.to_vec());
     }
     let mut m = vec![0.0_f32; pixels.len()];
     for y in 0..height {
@@ -310,7 +355,7 @@ fn reorient_for_axis_flags(
             m[dst + 2] = pixels[src + 2];
         }
     }
-    m
+    (width, height, m)
 }
 
 fn write_pixel_rows(

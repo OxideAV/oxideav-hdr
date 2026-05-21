@@ -17,16 +17,17 @@ Clean-room implementation against the published format documentation
 Radiance source / `image` crate's `hdr` submodule / Greg Ward's
 reference C code consulted.
 
-## Coverage (round 3)
+## Coverage (round 4)
 
 | Feature                      | Read | Write |
 |------------------------------|:----:|:-----:|
 | `#?RADIANCE` / `#?RGBE` magic|  Y   |   Y   |
 | `KEY=VALUE` header records   |  Y   |   Y   |
 | `EXPOSURE` / `GAMMA` / `PIXASPECT` / `SOFTWARE` | Y | Y |
+| Multiple `EXPOSURE` / `COLORCORR` records stacked multiplicatively | Y | n/a |
 | `COLORCORR` (3-float)        |  Y   |   Y   |
 | `PRIMARIES` (8-float chromaticity) | Y |   Y   |
-| All 8 axis-flag combinations |  Y   | 4 (Y-first; X-first canonicalised) |
+| All 8 axis-flag combinations |  Y   |  Y (Y-first + X-first transpose) |
 | 32-bit_rle_rgbe pixels       |  Y   |   Y   |
 | 32-bit_rle_xyze pixels       |  Y   |   Y (with helpers in `xyz`) |
 | New RLE (`0x02 0x02 hi lo`)  |  Y   |   Y   |
@@ -34,7 +35,8 @@ reference C code consulted.
 | Auto-RLE (width heuristic)   |  -   |   Y (`RleMode::Auto`) |
 | CRLF line endings            |  Y   |   N   |
 | XYZE ↔ RGB (sRGB / Radiance) |  -   | helpers |
-| Tone-mapping (Linear / Gamma / Reinhard / ReinhardExtended / Hable / Drago / ACES) | - | helpers |
+| `Primaries::SRGB` / `RADIANCE` / `P3_D65` / `REC2020` constants | n/a | constants |
+| Tone-mapping (Linear / Gamma / Reinhard / ReinhardExtended / ReinhardLuminance / Hable / Drago / ACES) | - | helpers |
 
 Cross-validated against ImageMagick 7's HDR codec (encoder output is
 decodable by `magick`, ImageMagick-written `.hdr` files round-trip

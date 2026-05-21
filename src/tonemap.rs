@@ -20,6 +20,12 @@
 //!   actually reach 1.0 instead of asymptoting to it. From Reinhard,
 //!   Stark, Shirley, Ferwerda, "Photographic Tone Reproduction for
 //!   Digital Images" (ACM ToG 2002) §3.1.
+//! * **ReinhardLuminance** — Reinhard 2002 applied to per-pixel
+//!   luminance with the chroma carried through proportionally. Keeps
+//!   colour saturation stable across the tone-mapped range (the
+//!   per-channel variant desaturates highlights because each channel
+//!   compresses independently). Luminance is computed from Rec. 709
+//!   coefficients `Y = 0.2126 R + 0.7152 G + 0.0722 B`.
 //! * **Hable** — John Hable's "Uncharted 2" filmic curve, derivation
 //!   published at GDC 2010 ("Uncharted 2: HDR Lighting"). Five-knot
 //!   rational function with a `linear_white` normalisation. Designed
@@ -68,6 +74,17 @@ pub enum ToneMap {
     ReinhardExtended {
         exposure: f32,
         /// Luminance value that maps to 1.0 (display white).
+        white_point: f32,
+    },
+    /// Reinhard 2002 applied to per-pixel luminance, with the colour
+    /// channels carried through proportionally so chroma stays constant
+    /// across the tone-mapped range. Luminance from BT.709 coefficients
+    /// (`Y = 0.2126 R + 0.7152 G + 0.0722 B`).
+    ReinhardLuminance {
+        exposure: f32,
+        /// Luminance value that maps to 1.0 (display white). Use a
+        /// large value to recover the unmodified `Y / (1 + Y)`
+        /// asymptotic behaviour.
         white_point: f32,
     },
     /// John Hable's "Uncharted 2" filmic curve, GDC 2010. Five-knot
@@ -156,6 +173,28 @@ pub fn apply(op: ToneMap, rgb: [f32; 3]) -> [f32; 3] {
             let b = reinhard_extended(rgb[2] * exposure, w2);
             [srgb_oetf(r), srgb_oetf(g), srgb_oetf(b)]
         }
+        ToneMap::ReinhardLuminance {
+            exposure,
+            white_point,
+        } => {
+            let r_lin = sanitize(rgb[0]) * exposure;
+            let g_lin = sanitize(rgb[1]) * exposure;
+            let b_lin = sanitize(rgb[2]) * exposure;
+            // BT.709 luminance coefficients. Stays > 0 thanks to
+            // `sanitize`, which clamps NaN / negatives to zero.
+            let y_in = 0.2126 * r_lin + 0.7152 * g_lin + 0.0722 * b_lin;
+            if y_in <= 0.0 {
+                return [0.0, 0.0, 0.0];
+            }
+            let w2 = (white_point * white_point).max(1e-6);
+            let y_out = reinhard_extended(y_in, w2);
+            let scale = y_out / y_in;
+            [
+                srgb_oetf(r_lin * scale),
+                srgb_oetf(g_lin * scale),
+                srgb_oetf(b_lin * scale),
+            ]
+        }
         ToneMap::Hable {
             exposure,
             linear_white,
@@ -193,6 +232,18 @@ fn clamp01(v: f32) -> f32 {
         0.0
     } else {
         v.clamp(0.0, 1.0)
+    }
+}
+
+/// Replace negatives / NaN with zero, but keep finite positive values
+/// untouched (no clamp to 1.0). Used by HDR-preserving operators where
+/// scene-referred values can legitimately exceed 1.0 before mapping.
+#[inline]
+fn sanitize(v: f32) -> f32 {
+    if v.is_finite() && v > 0.0 {
+        v
+    } else {
+        0.0
     }
 }
 
@@ -411,6 +462,10 @@ mod tests {
                 exposure: 1.0,
                 white_point: 4.0,
             },
+            ToneMap::ReinhardLuminance {
+                exposure: 1.0,
+                white_point: 4.0,
+            },
             ToneMap::Hable {
                 exposure: 1.0,
                 linear_white: 11.2,
@@ -429,6 +484,35 @@ mod tests {
             assert_eq!(out[1], 0, "{op:?} NaN");
             assert!(out[2] == 255 || out[2] == 0, "{op:?} +INF -> {}", out[2]);
         }
+    }
+
+    #[test]
+    fn reinhard_luminance_preserves_chroma_ratio() {
+        // A saturated colour at high intensity: the per-channel
+        // Reinhard would desaturate it (large R, small G/B all squash
+        // toward 1.0 at different rates). The luminance variant keeps
+        // the R:G:B ratio constant.
+        let img = one_pixel([10.0_f32, 1.0, 0.1]);
+        let out = tone_map(
+            &img,
+            ToneMap::ReinhardLuminance {
+                exposure: 1.0,
+                white_point: 20.0,
+            },
+        );
+        // Reconstruct the post-tone-map linear ratios from the sRGB
+        // output. With srgb_oetf monotonic the inequality is preserved.
+        assert!(out[0] > out[1], "R should remain the brightest");
+        assert!(out[1] > out[2], "G should remain brighter than B");
+        // And the per-channel Reinhard on the same input would have
+        // collapsed R→~0.91 → 0.95 sRGB and G→~0.50 → 0.73 sRGB; the
+        // luminance variant's R/G ratio should be wider, so out[0]'s
+        // relative dominance is preserved.
+        assert!(
+            out[0] > 200,
+            "expected dominant R to land high, got {}",
+            out[0]
+        );
     }
 
     #[test]

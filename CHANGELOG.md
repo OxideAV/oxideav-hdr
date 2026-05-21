@@ -9,6 +9,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Round 4: encoder fully honours `HdrHeader::x_first` — the four
+  X-first axis-flag combinations (`±X W ±Y H`) now produce on-disk
+  files with the requested resolution-line ordering, transposing the
+  canonical top-down `(y, x)` buffer on the way out so each on-disk
+  scanline holds one column's worth of Y samples. The decoder also
+  gained X-first scanline-count + transpose support; a previous
+  off-by-one in the loop counts (only Y-first was ever exercised end
+  to end) is fixed. All 8 axis-flag combinations now round-trip
+  exhaustively via the public API (covered by
+  `encoder_round_trips_all_eight_axis_orderings`).
+- Round 4: multiple `EXPOSURE=` records in the same file are now
+  stacked multiplicatively per the Radiance reference manual
+  (`exposure = ∏ values`). Same rule applied to multiple
+  `COLORCORR=` records (element-wise product across occurrences). The
+  single-record case is preserved; the stacking only changes behaviour
+  when a file has more than one record of the same kind.
+- Round 4: two new named `Primaries` constants — `Primaries::P3_D65`
+  (Display P3, SMPTE RP 431-2 primaries with D65 white per the
+  Display P3 specification) and `Primaries::REC2020` (ITU-R BT.2020-2
+  Table 4 ultra-wide-gamut primaries with D65 white). Both round-trip
+  losslessly via `to_record_string` / `from_record_str`.
+- Round 4: `ToneMap::ReinhardLuminance` — Reinhard 2002 applied to
+  per-pixel luminance (BT.709 coefficients) with the chroma carried
+  through proportionally. Preserves colour saturation across the
+  tone-mapped range where the per-channel variant desaturates
+  highlights.
 - Round 3: typed `HdrHeader::colorcorr` slot for the Radiance
   `COLORCORR=R G B` per-channel correction record. Decoder parses
   three floats, encoder writes them, round-trip preserves the value.

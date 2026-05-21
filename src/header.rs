@@ -117,6 +117,28 @@ impl Primaries {
         white: (1.0 / 3.0, 1.0 / 3.0),
     };
 
+    /// DCI-P3 with a D65 reference white — the wide-gamut RGB space
+    /// most consumer HDR displays (Apple "Display P3", Android Display
+    /// P3) target. Primaries per SMPTE RP 431-2 (D-Cinema reference
+    /// projector) with the white point swapped from DCI to D65 per the
+    /// Display P3 specification used by sRGB-replacement HDR pipelines.
+    pub const P3_D65: Self = Self {
+        red: (0.680, 0.320),
+        green: (0.265, 0.690),
+        blue: (0.150, 0.060),
+        white: (0.3127, 0.3290),
+    };
+
+    /// ITU-R BT.2020 / Rec.2020 ultra-wide-gamut primaries with a D65
+    /// reference white. The colour space used by HDR10 / HLG TV
+    /// production. Values per ITU-R BT.2020-2 §2 Table 4.
+    pub const REC2020: Self = Self {
+        red: (0.708, 0.292),
+        green: (0.170, 0.797),
+        blue: (0.131, 0.046),
+        white: (0.3127, 0.3290),
+    };
+
     /// Format as the eight-float space-separated string the on-disk
     /// `PRIMARIES=` record uses.
     pub fn to_record_string(&self) -> String {
@@ -231,5 +253,45 @@ mod tests {
     #[test]
     fn primaries_rejects_short_record() {
         assert!(Primaries::from_record_str("0.64 0.33 0.30 0.60").is_none());
+    }
+
+    #[test]
+    fn p3_d65_constants_match_spec() {
+        // SMPTE RP 431-2 primaries with white point swapped to D65 per
+        // the Display P3 spec.
+        let p = Primaries::P3_D65;
+        assert!((p.red.0 - 0.680).abs() < 1e-4);
+        assert!((p.red.1 - 0.320).abs() < 1e-4);
+        assert!((p.green.0 - 0.265).abs() < 1e-4);
+        assert!((p.green.1 - 0.690).abs() < 1e-4);
+        assert!((p.blue.0 - 0.150).abs() < 1e-4);
+        assert!((p.blue.1 - 0.060).abs() < 1e-4);
+        assert!((p.white.0 - 0.3127).abs() < 1e-4);
+        assert!((p.white.1 - 0.3290).abs() < 1e-4);
+    }
+
+    #[test]
+    fn rec2020_constants_match_spec() {
+        // ITU-R BT.2020-2 Table 4.
+        let p = Primaries::REC2020;
+        assert!((p.red.0 - 0.708).abs() < 1e-4);
+        assert!((p.red.1 - 0.292).abs() < 1e-4);
+        assert!((p.green.0 - 0.170).abs() < 1e-4);
+        assert!((p.green.1 - 0.797).abs() < 1e-4);
+        assert!((p.blue.0 - 0.131).abs() < 1e-4);
+        assert!((p.blue.1 - 0.046).abs() < 1e-4);
+        assert!((p.white.0 - 0.3127).abs() < 1e-4);
+        assert!((p.white.1 - 0.3290).abs() < 1e-4);
+    }
+
+    #[test]
+    fn p3_d65_roundtrips_via_record_string() {
+        let p = Primaries::P3_D65;
+        let s = p.to_record_string();
+        let back = Primaries::from_record_str(&s).unwrap();
+        assert!((back.red.0 - p.red.0).abs() < 1e-5);
+        assert!((back.green.0 - p.green.0).abs() < 1e-5);
+        assert!((back.blue.0 - p.blue.0).abs() < 1e-5);
+        assert!((back.white.0 - p.white.0).abs() < 1e-5);
     }
 }

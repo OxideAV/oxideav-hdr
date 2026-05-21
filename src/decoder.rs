@@ -103,7 +103,16 @@ pub fn parse_hdr(input: &[u8]) -> Result<HdrImage> {
     let mut cursor = 0usize;
     let mut header = parse_header(input, &mut cursor)?;
     let (width, height) = parse_resolution(input, &mut cursor, &mut header)?;
-    let pixels = decode_pixel_rows(input, &mut cursor, width, height)?;
+    // Resolution line lists the *outer* axis first, then the inner axis.
+    // For Y-first files (`±Y H ±X W`) that's H scanlines of W pixels.
+    // For X-first files (`±X W ±Y H`) it's W scanlines of H pixels —
+    // each scanline is one column's worth of Y samples.
+    let (scanline_count, scanline_len) = if header.x_first {
+        (width, height)
+    } else {
+        (height, width)
+    };
+    let pixels = decode_pixel_rows(input, &mut cursor, scanline_len, scanline_count)?;
     let pixels = reorder_for_axis_flags(pixels, width, height, &header);
     Ok(HdrImage {
         width: width as u32,
@@ -158,12 +167,19 @@ fn parse_header(input: &[u8], cursor: &mut usize) -> Result<HdrHeader> {
                 };
             }
             "EXPOSURE" => {
-                header.exposure = Some(
-                    value
-                        .trim()
-                        .parse::<f32>()
-                        .map_err(|_| Error::invalid("HDR: invalid EXPOSURE"))?,
-                );
+                // Per the Radiance reference manual, multiple EXPOSURE
+                // records stack multiplicatively (each one represents an
+                // additional exposure-adjustment pass applied to the
+                // already-encoded radiance values). Accumulate the
+                // product across all occurrences.
+                let v = value
+                    .trim()
+                    .parse::<f32>()
+                    .map_err(|_| Error::invalid("HDR: invalid EXPOSURE"))?;
+                header.exposure = Some(match header.exposure {
+                    Some(prev) => prev * v,
+                    None => v,
+                });
             }
             "GAMMA" => {
                 header.gamma = Some(
@@ -198,7 +214,12 @@ fn parse_header(input: &[u8], cursor: &mut usize) -> Result<HdrHeader> {
                 let b: f32 = parts[2]
                     .parse()
                     .map_err(|_| Error::invalid("HDR: invalid COLORCORR blue"))?;
-                header.colorcorr = Some([r, g, b]);
+                // Per the Radiance reference manual, COLORCORR records
+                // stack multiplicatively in the same way as EXPOSURE.
+                header.colorcorr = Some(match header.colorcorr {
+                    Some([pr, pg, pb]) => [pr * r, pg * g, pb * b],
+                    None => [r, g, b],
+                });
             }
             "PRIMARIES" => {
                 header.primaries = Some(
@@ -309,6 +330,13 @@ fn decode_pixel_rows(
 
 /// Reorder rows / mirror within rows so the output is always top-down,
 /// left-to-right regardless of the on-disk axis flags.
+///
+/// `width` / `height` are the *image* dimensions (matching the caller-
+/// visible `HdrImage`). For Y-first files the decoded buffer is already
+/// in `(y, x)` row-major layout. For X-first files the decoded buffer
+/// is in `(x, y)` order — each on-disk scanline holds one column's
+/// worth of Y samples — so we transpose first to land in the canonical
+/// `(y, x)` layout, then apply the axis-sign flips.
 fn reorder_for_axis_flags(
     pixels: Vec<f32>,
     width: usize,
@@ -316,19 +344,15 @@ fn reorder_for_axis_flags(
     header: &HdrHeader,
 ) -> Vec<f32> {
     let mut out = pixels;
-    // X-first means rows-of-Y are scanned at the inner level. Our
-    // `decode_pixel_rows` has stored them in scanline-major order
-    // (height outer, width inner) already — for an X-first file that
-    // means the on-disk "row" was actually a column. Transpose first,
-    // then apply the axis-sign flips.
     if header.x_first {
-        out = transpose(&out, width, height);
-        // After transpose the in-memory width/height are swapped.
-        let (w, h) = (height, width);
-        out = apply_axis_flips(out, w, h, header.x_sign, header.y_sign);
-    } else {
-        out = apply_axis_flips(out, width, height, header.x_sign, header.y_sign);
+        // Source layout: (x, y) row-major with `width` outer rows and
+        // `height` inner cols. Transpose flips that to (y, x) row-major
+        // with `height` outer rows and `width` inner cols.
+        out = transpose(&out, height, width);
     }
+    // After the optional transpose the in-memory layout is canonical
+    // (y, x) with the caller-visible (width, height) dimensions.
+    out = apply_axis_flips(out, width, height, header.x_sign, header.y_sign);
     out
 }
 
@@ -429,5 +453,42 @@ mod tests {
         assert!(parse_axis_flag("+Z").is_err());
         assert!(parse_axis_flag("/Y").is_err());
         assert_eq!(parse_axis_flag("-Y").unwrap(), ('Y', AxisSign::Decreasing));
+    }
+
+    #[test]
+    fn multiple_exposure_records_stack_multiplicatively() {
+        // Per the Radiance reference manual, EXPOSURE records stack
+        // multiplicatively. Two records (0.5 and 0.25) should land at
+        // 0.125 in the decoded header.
+        let bytes = b"#?RADIANCE\nEXPOSURE=0.5\nEXPOSURE=0.25\n\n-Y 1 +X 8\n";
+        let mut cursor = 0usize;
+        let header = parse_header(bytes, &mut cursor).unwrap();
+        let e = header.exposure.expect("EXPOSURE missing");
+        assert!((e - 0.125).abs() < 1e-6, "expected 0.125, got {e}");
+    }
+
+    #[test]
+    fn multiple_colorcorr_records_stack_multiplicatively() {
+        // Same rule as EXPOSURE — element-wise product across records.
+        let bytes = b"#?RADIANCE\nCOLORCORR=2.0 0.5 1.0\nCOLORCORR=0.5 0.5 2.0\n\n-Y 1 +X 8\n";
+        let mut cursor = 0usize;
+        let header = parse_header(bytes, &mut cursor).unwrap();
+        let cc = header.colorcorr.expect("COLORCORR missing");
+        assert!((cc[0] - 1.0).abs() < 1e-6, "R: expected 1.0, got {}", cc[0]);
+        assert!(
+            (cc[1] - 0.25).abs() < 1e-6,
+            "G: expected 0.25, got {}",
+            cc[1]
+        );
+        assert!((cc[2] - 2.0).abs() < 1e-6, "B: expected 2.0, got {}", cc[2]);
+    }
+
+    #[test]
+    fn single_exposure_record_is_passed_through() {
+        // The stacking shouldn't break the single-record case.
+        let bytes = b"#?RADIANCE\nEXPOSURE=1.5\n\n-Y 1 +X 8\n";
+        let mut cursor = 0usize;
+        let header = parse_header(bytes, &mut cursor).unwrap();
+        assert_eq!(header.exposure, Some(1.5));
     }
 }

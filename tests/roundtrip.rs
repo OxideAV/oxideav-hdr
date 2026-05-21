@@ -120,18 +120,24 @@ fn encoder_honours_increasing_y_flag() {
 }
 
 #[test]
-fn encoder_canonicalises_x_first_request_back_to_y_first() {
-    // The encoder doesn't implement the X-first orderings yet — when
-    // the caller asks for one it falls back to the canonical Y-first
-    // layout (`-Y H +X W`). Round-tripping a synthetic `x_first = true`
-    // flag therefore loses that single header bit but keeps the
-    // pixels intact.
+fn encoder_writes_x_first_resolution_line_when_requested() {
+    // Round 4: the encoder honours `x_first = true`. Resolution line
+    // starts with the X flag, the canonical buffer is transposed on
+    // the way out, and the decoder applies the inverse transform so
+    // round-trip pixels match.
     let w = 16_u32;
     let h = 8_u32;
     let mut pixels = vec![0.1_f32; (w * h * 3) as usize];
+    // Distinct top-left marker.
     pixels[0] = 7.0;
     pixels[1] = 0.0;
     pixels[2] = 0.0;
+    // Distinct bottom-right marker as well so a partial transpose can
+    // be diagnosed.
+    let last = pixels.len() - 3;
+    pixels[last] = 0.0;
+    pixels[last + 1] = 9.0;
+    pixels[last + 2] = 0.0;
     let mut src = HdrImage::new_rgb96f(w, h, pixels);
     src.header.x_first = true;
     let bytes = encode_hdr(&src).unwrap();
@@ -140,17 +146,86 @@ fn encoder_canonicalises_x_first_request_back_to_y_first() {
     let res_end = res_start + bytes[res_start..].iter().position(|&b| b == b'\n').unwrap();
     let resline = std::str::from_utf8(&bytes[res_start..res_end]).unwrap();
     assert!(
-        resline.starts_with("-Y ") || resline.starts_with("+Y "),
-        "expected Y-first canonicalisation, got: {resline:?}"
+        resline.starts_with("-X ") || resline.starts_with("+X "),
+        "expected X-first resolution line, got: {resline:?}"
+    );
+    // The X-value listed in the resolution line is the original image
+    // width, the Y-value is the original image height — regardless of
+    // which one comes first on the wire.
+    assert!(
+        resline.contains(&format!(" {w} ")) && resline.ends_with(&format!(" {h}")),
+        "expected '... {w} ... {h}', got: {resline:?}"
     );
     let back = parse_hdr(&bytes).unwrap();
     assert_eq!(back.width, w);
     assert_eq!(back.height, h);
+    assert!(back.header.x_first);
     assert!(
         (back.pixels[0] - 7.0).abs() < 0.1,
-        "top-left pixel lost across canonicalisation: {}",
+        "top-left pixel lost across x_first round-trip: {}",
         back.pixels[0]
     );
+    let last = back.pixels.len() - 3;
+    assert!(
+        (back.pixels[last + 1] - 9.0).abs() < 0.1,
+        "bottom-right pixel lost across x_first round-trip: {}",
+        back.pixels[last + 1]
+    );
+}
+
+#[test]
+fn encoder_round_trips_all_eight_axis_orderings() {
+    // Exhaustively verify each (y_sign, x_sign, x_first) combination
+    // round-trips losslessly via the public API.
+    use oxideav_hdr::AxisSign::{Decreasing, Increasing};
+    let w = 16_u32;
+    let h = 8_u32;
+    let mut pixels = vec![0.0_f32; (w * h * 3) as usize];
+    // Encode a per-pixel signature so any reordering bug shows up.
+    for y in 0..h as usize {
+        for x in 0..w as usize {
+            let off = (y * w as usize + x) * 3;
+            pixels[off] = (y as f32) * 100.0 + x as f32;
+            pixels[off + 1] = (y as f32) + 0.5;
+            pixels[off + 2] = (x as f32) * 0.25;
+        }
+    }
+    for &x_first in &[false, true] {
+        for &y_sign in &[Decreasing, Increasing] {
+            for &x_sign in &[Increasing, Decreasing] {
+                let mut img = HdrImage::new_rgb96f(w, h, pixels.clone());
+                img.header.x_first = x_first;
+                img.header.y_sign = y_sign;
+                img.header.x_sign = x_sign;
+                let bytes = encode_hdr(&img).unwrap_or_else(|e| {
+                    panic!("encode failed: {y_sign:?} {x_sign:?} x_first={x_first} → {e}")
+                });
+                let back = parse_hdr(&bytes).unwrap();
+                assert_eq!(back.width, w);
+                assert_eq!(back.height, h);
+                assert_eq!(back.header.x_first, x_first);
+                assert_eq!(back.header.y_sign, y_sign);
+                assert_eq!(back.header.x_sign, x_sign);
+                // Pixels should match within shared-exponent precision.
+                for i in 0..pixels.len() {
+                    let a = pixels[i];
+                    let b = back.pixels[i];
+                    let err = (a - b).abs();
+                    // Bigger samples carry the shared-exponent — allow
+                    // ~1% relative error or 1.0 absolute (small samples
+                    // sharing a large neighbour's exponent can drift).
+                    let pixel_idx = i / 3;
+                    let pmax = pixels[pixel_idx * 3..pixel_idx * 3 + 3]
+                        .iter()
+                        .fold(0.0_f32, |m, v| m.max(v.abs()));
+                    assert!(
+                        err < pmax / 100.0 || err < 1.0,
+                        "axis {y_sign:?} {x_sign:?} x_first={x_first} pixel {i}: {a} vs {b}"
+                    );
+                }
+            }
+        }
+    }
 }
 
 #[test]
