@@ -9,6 +9,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Round 5: typed `HdrHeader::view` slot for the Radiance `VIEW=` record
+  (the renderer's view-parameter string — `-vp`, `-vd`, `-vu`, `-vh`,
+  `-vv`, … flags concatenated). Previously fell through to
+  `HdrHeader::other`; now decoded into the typed slot and re-emitted by
+  the encoder. Last record wins when stacked across rerender passes.
+- Round 5: `LineEnding::{Lf,Crlf}` plus `encode_hdr_with_options` —
+  full encoder parity with the existing read-side CRLF support. Magic
+  line, `KEY=VALUE` records, blank-line terminator and resolution line
+  honour the chosen line ending; the binary pixel payload that follows
+  is untouched. Default `encode_hdr` / `encode_hdr_with_rle` stays on
+  bare `\n` to match every shipped fixture in the Radiance reference
+  distribution.
+- Round 5: `HdrImage::apply_exposure` / `HdrImage::apply_colorcorr`
+  helpers — fold the parsed multiplicative `EXPOSURE=` / `COLORCORR=`
+  factors into the float pixel buffer in place and clear the header
+  slot. The decoder still returns the raw shared-exponent samples so
+  callers that want untouched radiance values keep them; callers that
+  want the post-exposure / post-correction values now have a one-liner.
 - Round 4: encoder fully honours `HdrHeader::x_first` — the four
   X-first axis-flag combinations (`±X W ±Y H`) now produce on-disk
   files with the requested resolution-line ordering, transposing the

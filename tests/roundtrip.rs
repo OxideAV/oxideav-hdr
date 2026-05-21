@@ -4,7 +4,8 @@
 //! catches accidental visibility regressions.
 
 use oxideav_hdr::{
-    encode_hdr, encode_hdr_with_rle, parse_hdr, AxisSign, HdrImage, HdrPixelFormat, RleMode,
+    encode_hdr, encode_hdr_with_options, encode_hdr_with_rle, parse_hdr, AxisSign, HdrImage,
+    HdrPixelFormat, LineEnding, RleMode,
 };
 
 /// Same gradient construction as the in-crate unit tests, kept here to
@@ -244,6 +245,75 @@ fn rle_mode_auto_falls_back_to_old_for_narrow_widths() {
     assert_eq!(back.height, h);
     for &v in &back.pixels {
         assert!((v - 0.5).abs() < 1e-2, "value drift: {v}");
+    }
+}
+
+#[test]
+fn crlf_line_ending_roundtrips_via_public_api() {
+    // Round 5: encoder honours `LineEnding::Crlf` on the magic line,
+    // KEY=VALUE records, blank-line terminator and resolution line. The
+    // pixel payload that follows is untouched.
+    let w = 16_u32;
+    let h = 4_u32;
+    let mut pixels = vec![0.0_f32; (w * h * 3) as usize];
+    for (i, p) in pixels.iter_mut().enumerate() {
+        *p = (i as f32 + 1.0) * 0.01;
+    }
+    let mut src = HdrImage::new_rgb96f(w, h, pixels.clone());
+    src.header.software = Some("oxideav-hdr/round5-crlf".to_owned());
+    let bytes = encode_hdr_with_options(&src, RleMode::New, LineEnding::Crlf).unwrap();
+    assert!(bytes.starts_with(b"#?RADIANCE\r\n"));
+    // Blank-line terminator must be `\r\n\r\n` (not bare `\n\n`).
+    assert!(bytes.windows(4).any(|w| w == b"\r\n\r\n"));
+    let back = parse_hdr(&bytes).unwrap();
+    assert_eq!(back.width, w);
+    assert_eq!(back.height, h);
+    assert_eq!(
+        back.header.software.as_deref(),
+        Some("oxideav-hdr/round5-crlf")
+    );
+    // Sample a couple of pixels — the pixel payload is binary, so CRLF
+    // shouldn't have touched it.
+    for (i, (&a, &b)) in pixels.iter().zip(back.pixels.iter()).enumerate() {
+        assert!(
+            (a - b).abs() < 0.02 || (a - b).abs() / a.max(1e-9) < 0.05,
+            "pixel {i}: {a} vs {b}",
+        );
+    }
+}
+
+#[test]
+fn view_record_round_trips_via_public_api() {
+    let mut src = HdrImage::new_rgb96f(16, 2, vec![0.5_f32; 16 * 2 * 3]);
+    let view = "rpict -vp 1 2 3 -vd 0 0 -1 -vu 0 1 0 -vh 60 -vv 40";
+    src.header.view = Some(view.to_owned());
+    let bytes = encode_hdr(&src).unwrap();
+    let back = parse_hdr(&bytes).unwrap();
+    assert_eq!(back.header.view.as_deref(), Some(view));
+}
+
+#[test]
+fn apply_exposure_and_colorcorr_chain_after_decode() {
+    // Round 5: apply_exposure / apply_colorcorr fold the parsed
+    // multiplicative factors into the pixel buffer in place.
+    let mut src = HdrImage::new_rgb96f(8, 2, vec![1.0_f32; 8 * 2 * 3]);
+    src.header.exposure = Some(0.5);
+    src.header.colorcorr = Some([2.0, 1.0, 0.5]);
+    let bytes = encode_hdr_with_rle(&src, RleMode::Old).unwrap();
+    let mut back = parse_hdr(&bytes).unwrap();
+    assert_eq!(back.header.exposure, Some(0.5));
+    assert_eq!(back.header.colorcorr, Some([2.0, 1.0, 0.5]));
+    back.apply_exposure();
+    back.apply_colorcorr();
+    assert!(back.header.exposure.is_none());
+    assert!(back.header.colorcorr.is_none());
+    // Each pixel should have been multiplied by 0.5 then componentwise
+    // by [2, 1, 0.5] → effective [1.0, 0.5, 0.25] starting from
+    // [1, 1, 1]. Allow ~1.5% for shared-exponent quantisation.
+    for px in back.pixels.chunks_exact(3) {
+        assert!((px[0] - 1.0).abs() < 0.02, "R: {}", px[0]);
+        assert!((px[1] - 0.5).abs() < 0.02, "G: {}", px[1]);
+        assert!((px[2] - 0.25).abs() < 0.02, "B: {}", px[2]);
     }
 }
 

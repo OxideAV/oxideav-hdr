@@ -17,13 +17,14 @@ Clean-room implementation against the published format documentation
 Radiance source / `image` crate's `hdr` submodule / Greg Ward's
 reference C code consulted.
 
-## Coverage (round 4)
+## Coverage (round 5)
 
 | Feature                      | Read | Write |
 |------------------------------|:----:|:-----:|
 | `#?RADIANCE` / `#?RGBE` magic|  Y   |   Y   |
 | `KEY=VALUE` header records   |  Y   |   Y   |
 | `EXPOSURE` / `GAMMA` / `PIXASPECT` / `SOFTWARE` | Y | Y |
+| `VIEW=` renderer view-parameter record | Y | Y |
 | Multiple `EXPOSURE` / `COLORCORR` records stacked multiplicatively | Y | n/a |
 | `COLORCORR` (3-float)        |  Y   |   Y   |
 | `PRIMARIES` (8-float chromaticity) | Y |   Y   |
@@ -33,7 +34,9 @@ reference C code consulted.
 | New RLE (`0x02 0x02 hi lo`)  |  Y   |   Y   |
 | Old RLE (sentinel pixels)    |  Y   |   Y (`RleMode::Old`) |
 | Auto-RLE (width heuristic)   |  -   |   Y (`RleMode::Auto`) |
-| CRLF line endings            |  Y   |   N   |
+| CRLF line endings            |  Y   |   Y (`LineEnding::Crlf`) |
+| `HdrImage::apply_exposure`   |  decode helper |  n/a |
+| `HdrImage::apply_colorcorr`  |  decode helper |  n/a |
 | XYZE ↔ RGB (sRGB / Radiance) |  -   | helpers |
 | `Primaries::SRGB` / `RADIANCE` / `P3_D65` / `REC2020` constants | n/a | constants |
 | Tone-mapping (Linear / Gamma / Reinhard / ReinhardExtended / ReinhardLuminance / Hable / Drago / ACES) | - | helpers |

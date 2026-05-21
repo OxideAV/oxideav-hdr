@@ -189,6 +189,12 @@ pub struct HdrHeader {
     pub software: Option<String>,
     /// `PIXASPECT=` value.
     pub pixaspect: Option<f32>,
+    /// `VIEW=` record. Free-form camera / view-parameter string written
+    /// by the Radiance renderer (`-vp`, `-vd`, `-vu`, `-vh`, `-vv`, …
+    /// flags concatenated). The reference manual documents the record
+    /// as caller-defined text — we preserve the value verbatim and
+    /// leave any tokenisation to the consumer.
+    pub view: Option<String>,
     /// `COLORCORR=` three-float per-channel correction. The Radiance
     /// reference manual defines it as a multiplicative scale applied to
     /// the float channels on the way out of decode (separately from
@@ -225,6 +231,7 @@ impl Default for HdrHeader {
             gamma: None,
             software: None,
             pixaspect: None,
+            view: None,
             colorcorr: None,
             primaries: None,
             other: Vec::new(),

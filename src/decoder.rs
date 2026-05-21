@@ -200,6 +200,16 @@ fn parse_header(input: &[u8], cursor: &mut usize) -> Result<HdrHeader> {
             "SOFTWARE" => {
                 header.software = Some(value.to_owned());
             }
+            "VIEW" => {
+                // Per the Radiance reference manual, the VIEW record is
+                // free-form text containing the renderer's view
+                // parameters. We preserve the literal value. When more
+                // than one VIEW record appears (renderers can stack
+                // them across rerender passes), each subsequent one
+                // wins — the reference convention is "the last VIEW=
+                // record on the page describes the present picture".
+                header.view = Some(value.to_owned());
+            }
             "COLORCORR" => {
                 let parts: Vec<&str> = value.split_whitespace().collect();
                 if parts.len() != 3 {
@@ -481,6 +491,28 @@ mod tests {
             cc[1]
         );
         assert!((cc[2] - 2.0).abs() < 1e-6, "B: expected 2.0, got {}", cc[2]);
+    }
+
+    #[test]
+    fn view_record_is_parsed_into_typed_slot() {
+        let bytes =
+            b"#?RADIANCE\nFORMAT=32-bit_rle_rgbe\nVIEW=rvu -vp 0 0 10 -vd 0 0 -1\n\n-Y 1 +X 8\n";
+        let mut cursor = 0usize;
+        let header = parse_header(bytes, &mut cursor).unwrap();
+        assert_eq!(header.view.as_deref(), Some("rvu -vp 0 0 10 -vd 0 0 -1"));
+        // The typed VIEW slot should NOT also leak into `other`.
+        assert!(header.other.iter().all(|(k, _)| k != "VIEW"));
+    }
+
+    #[test]
+    fn last_view_record_wins_when_stacked() {
+        // Renderers can write multiple VIEW= records across rerender
+        // passes. The reference convention is "the last VIEW record on
+        // the page describes the present picture".
+        let bytes = b"#?RADIANCE\nVIEW=rvu -vp 0 0 5\nVIEW=rvu -vp 0 0 10\n\n-Y 1 +X 8\n";
+        let mut cursor = 0usize;
+        let header = parse_header(bytes, &mut cursor).unwrap();
+        assert_eq!(header.view.as_deref(), Some("rvu -vp 0 0 10"));
     }
 
     #[test]

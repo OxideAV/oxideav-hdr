@@ -26,6 +26,33 @@ use crate::image::{HdrImage, HdrPixelFormat};
 use crate::rgbe::rgb_to_rgbe;
 use crate::rle::{encode_scanline, encode_scanline_old_rle};
 
+/// Choice of line terminator used by the encoder's text section
+/// (magic line, `KEY=VALUE` records, blank-line separator, resolution
+/// line). The pixel payload that follows is always pure binary RLE.
+///
+/// The Radiance reader treats both `\n` and `\r\n` as a line break
+/// (current decoder strips `\r` via [`crate::decoder::parse_hdr`]); the
+/// encoder defaults to bare `\n` for the smaller wire image but
+/// [`LineEnding::Crlf`] can be requested when the on-disk file needs to
+/// match the CRLF convention some Windows-era Radiance tools used.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LineEnding {
+    /// Single `\n` (the default, matches every shipped fixture in the
+    /// Radiance reference distribution).
+    Lf,
+    /// `\r\n` for every text line. Pure-binary pixel payload unchanged.
+    Crlf,
+}
+
+impl LineEnding {
+    fn as_bytes(self) -> &'static [u8] {
+        match self {
+            Self::Lf => b"\n",
+            Self::Crlf => b"\r\n",
+        }
+    }
+}
+
 /// Choice of RLE flavour for the encoded scanlines.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RleMode {
@@ -174,6 +201,21 @@ pub fn encode_hdr(image: &HdrImage) -> Result<Vec<u8>> {
 /// narrow images that fall outside the new-RLE width range
 /// `8..=32767`, or when matching a legacy fixture exactly).
 pub fn encode_hdr_with_rle(image: &HdrImage, rle: RleMode) -> Result<Vec<u8>> {
+    encode_hdr_with_options(image, rle, LineEnding::Lf)
+}
+
+/// Full-control encode: pick the RLE flavour and the text-line
+/// terminator independently.
+///
+/// The pixel payload following the resolution line is identical to
+/// what [`encode_hdr_with_rle`] would produce — only the bytes of the
+/// magic line, KEY=VALUE records, header terminator and resolution
+/// line change between `LineEnding::Lf` and `LineEnding::Crlf`.
+pub fn encode_hdr_with_options(
+    image: &HdrImage,
+    rle: RleMode,
+    line_ending: LineEnding,
+) -> Result<Vec<u8>> {
     let w = image.width as usize;
     let h = image.height as usize;
     if image.pixels.len() != w * h * 3 {
@@ -217,8 +259,8 @@ pub fn encode_hdr_with_rle(image: &HdrImage, rle: RleMode) -> Result<Vec<u8>> {
         )));
     }
     let mut out = Vec::with_capacity(32 + out_w * out_h * 4);
-    write_header(&mut out, &image.header);
-    write_resolution(&mut out, out_w, out_h, &image.header);
+    write_header(&mut out, &image.header, line_ending);
+    write_resolution(&mut out, out_w, out_h, &image.header, line_ending);
     write_pixel_rows(&mut out, out_w, out_h, &oriented, effective_rle)?;
     Ok(out)
 }
@@ -241,39 +283,60 @@ pub fn encode_hdr_rgb96f(
     encode_hdr(&img)
 }
 
-fn write_header(out: &mut Vec<u8>, header: &HdrHeader) {
-    out.extend_from_slice(b"#?RADIANCE\n");
-    out.extend_from_slice(format!("FORMAT={}\n", header.format.as_str()).as_bytes());
+fn write_header(out: &mut Vec<u8>, header: &HdrHeader, eol: LineEnding) {
+    let nl = eol.as_bytes();
+    out.extend_from_slice(b"#?RADIANCE");
+    out.extend_from_slice(nl);
+    out.extend_from_slice(format!("FORMAT={}", header.format.as_str()).as_bytes());
+    out.extend_from_slice(nl);
     if let Some(g) = header.gamma {
-        out.extend_from_slice(format!("GAMMA={g}\n").as_bytes());
+        out.extend_from_slice(format!("GAMMA={g}").as_bytes());
+        out.extend_from_slice(nl);
     }
     if let Some(e) = header.exposure {
-        out.extend_from_slice(format!("EXPOSURE={e}\n").as_bytes());
+        out.extend_from_slice(format!("EXPOSURE={e}").as_bytes());
+        out.extend_from_slice(nl);
     }
     if let Some(p) = header.pixaspect {
-        out.extend_from_slice(format!("PIXASPECT={p}\n").as_bytes());
+        out.extend_from_slice(format!("PIXASPECT={p}").as_bytes());
+        out.extend_from_slice(nl);
     }
     if let Some([r, g, b]) = header.colorcorr {
-        out.extend_from_slice(format!("COLORCORR={r} {g} {b}\n").as_bytes());
+        out.extend_from_slice(format!("COLORCORR={r} {g} {b}").as_bytes());
+        out.extend_from_slice(nl);
     }
     if let Some(p) = header.primaries {
-        out.extend_from_slice(format!("PRIMARIES={}\n", p.to_record_string()).as_bytes());
+        out.extend_from_slice(format!("PRIMARIES={}", p.to_record_string()).as_bytes());
+        out.extend_from_slice(nl);
     }
     if let Some(s) = &header.software {
-        out.extend_from_slice(format!("SOFTWARE={s}\n").as_bytes());
+        out.extend_from_slice(format!("SOFTWARE={s}").as_bytes());
+        out.extend_from_slice(nl);
+    }
+    if let Some(v) = &header.view {
+        out.extend_from_slice(format!("VIEW={v}").as_bytes());
+        out.extend_from_slice(nl);
     }
     for (k, v) in &header.other {
         // Keep arbitrary records the caller stashed earlier.
-        out.extend_from_slice(format!("{k}={v}\n").as_bytes());
+        out.extend_from_slice(format!("{k}={v}").as_bytes());
+        out.extend_from_slice(nl);
     }
     for c in &header.comments {
-        out.extend_from_slice(format!("#{c}\n").as_bytes());
+        out.extend_from_slice(format!("#{c}").as_bytes());
+        out.extend_from_slice(nl);
     }
     // Empty line terminates the header.
-    out.push(b'\n');
+    out.extend_from_slice(nl);
 }
 
-fn write_resolution(out: &mut Vec<u8>, out_width: usize, out_height: usize, header: &HdrHeader) {
+fn write_resolution(
+    out: &mut Vec<u8>,
+    out_width: usize,
+    out_height: usize,
+    header: &HdrHeader,
+    eol: LineEnding,
+) {
     let y_flag = match header.y_sign {
         AxisSign::Decreasing => "-Y",
         AxisSign::Increasing => "+Y",
@@ -290,10 +353,11 @@ fn write_resolution(out: &mut Vec<u8>, out_width: usize, out_height: usize, head
     // `out_height` is the *image* width and vice versa.
     if header.x_first {
         // out_height = canonical width, out_width = canonical height.
-        out.extend_from_slice(format!("{x_flag} {out_height} {y_flag} {out_width}\n").as_bytes());
+        out.extend_from_slice(format!("{x_flag} {out_height} {y_flag} {out_width}").as_bytes());
     } else {
-        out.extend_from_slice(format!("{y_flag} {out_height} {x_flag} {out_width}\n").as_bytes());
+        out.extend_from_slice(format!("{y_flag} {out_height} {x_flag} {out_width}").as_bytes());
     }
+    out.extend_from_slice(eol.as_bytes());
 }
 
 /// Reorder a canonical top-down `(y, x)` row-major float buffer into
@@ -388,4 +452,120 @@ fn write_pixel_rows(
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::decoder::parse_hdr;
+
+    fn pattern(w: u32, h: u32) -> HdrImage {
+        let mut pixels = Vec::with_capacity((w * h * 3) as usize);
+        for i in 0..(w * h) as usize {
+            pixels.push((i as f32 + 1.0) * 0.01);
+            pixels.push((i as f32 + 1.0) * 0.005);
+            pixels.push((i as f32 + 1.0) * 0.002);
+        }
+        HdrImage::new_rgb96f(w, h, pixels)
+    }
+
+    #[test]
+    fn crlf_encoder_terminates_every_text_line_with_crlf() {
+        // 16-wide so the new-RLE path fires.
+        let img = pattern(16, 4);
+        let bytes = encode_hdr_with_options(&img, RleMode::New, LineEnding::Crlf).unwrap();
+        // The magic, FORMAT line, blank-line terminator and resolution
+        // line must all end in `\r\n`.
+        assert!(bytes.starts_with(b"#?RADIANCE\r\n"));
+        // The first six bytes after the magic begin "FORMAT".
+        let after_magic = &bytes[b"#?RADIANCE\r\n".len()..];
+        assert!(after_magic.starts_with(b"FORMAT="));
+        // No bare `\n` should precede the pixel payload start.
+        // Locate the blank-line terminator (a `\r\n\r\n` quartet) — the
+        // pixel data starts after the following resolution line.
+        let blank_pos = bytes
+            .windows(4)
+            .position(|w| w == b"\r\n\r\n")
+            .expect("CRLF blank terminator missing");
+        // Confirm the resolution line that follows is CRLF too.
+        let resline_start = blank_pos + 4;
+        let resline_end = resline_start
+            + bytes[resline_start..]
+                .windows(2)
+                .position(|w| w == b"\r\n")
+                .expect("CRLF resolution-line terminator missing");
+        let resline = std::str::from_utf8(&bytes[resline_start..resline_end]).unwrap();
+        assert!(
+            resline.starts_with("-Y ") || resline.starts_with("+Y "),
+            "unexpected resolution-line orientation: {resline:?}",
+        );
+        // Roundtrip through the decoder (which already strips `\r`).
+        let back = parse_hdr(&bytes).unwrap();
+        assert_eq!(back.width, 16);
+        assert_eq!(back.height, 4);
+    }
+
+    #[test]
+    fn lf_encoder_produces_no_carriage_returns_in_text_section() {
+        // Confirm the default LF path doesn't accidentally pick up a
+        // `\r` anywhere in the text section.
+        let img = pattern(16, 2);
+        let bytes = encode_hdr_with_options(&img, RleMode::New, LineEnding::Lf).unwrap();
+        // Locate the LF blank-line terminator.
+        let blank_pos = bytes
+            .windows(2)
+            .position(|w| w == b"\n\n")
+            .expect("LF blank terminator missing");
+        // Then the LF after the resolution line.
+        let resline_end = blank_pos
+            + 2
+            + bytes[blank_pos + 2..]
+                .iter()
+                .position(|&b| b == b'\n')
+                .unwrap();
+        // No `\r` should appear in the text section ([0..resline_end+1]).
+        assert!(
+            !bytes[..=resline_end].contains(&b'\r'),
+            "LF encoder leaked a carriage return into the text section",
+        );
+    }
+
+    #[test]
+    fn view_record_round_trips_through_encoder_and_decoder() {
+        let mut img = pattern(16, 2);
+        img.header.view = Some("rvu -vp 0 0 10 -vd 0 0 -1 -vu 0 1 0".to_owned());
+        let bytes = encode_hdr(&img).unwrap();
+        let head_end = bytes.windows(2).position(|w| w == b"\n\n").unwrap();
+        let head = std::str::from_utf8(&bytes[..head_end]).unwrap();
+        assert!(
+            head.contains("VIEW=rvu -vp 0 0 10 -vd 0 0 -1 -vu 0 1 0"),
+            "VIEW record missing from header: {head:?}",
+        );
+        let back = parse_hdr(&bytes).unwrap();
+        assert_eq!(
+            back.header.view.as_deref(),
+            Some("rvu -vp 0 0 10 -vd 0 0 -1 -vu 0 1 0")
+        );
+    }
+
+    #[test]
+    fn crlf_round_trips_all_typed_header_records() {
+        // Ensure the CRLF encoder doesn't accidentally drop typed
+        // records by relying on `\n` being a single byte.
+        let mut img = pattern(16, 2);
+        img.header.exposure = Some(2.0);
+        img.header.gamma = Some(1.0);
+        img.header.software = Some("oxideav-hdr/crlf".to_owned());
+        img.header.view = Some("rvu -vp 0 0 5".to_owned());
+        img.header.colorcorr = Some([1.1, 1.0, 0.9]);
+        img.header.pixaspect = Some(1.0);
+        let bytes = encode_hdr_with_options(&img, RleMode::New, LineEnding::Crlf).unwrap();
+        let back = parse_hdr(&bytes).unwrap();
+        assert_eq!(back.header.exposure, Some(2.0));
+        assert_eq!(back.header.gamma, Some(1.0));
+        assert_eq!(back.header.software.as_deref(), Some("oxideav-hdr/crlf"));
+        assert_eq!(back.header.view.as_deref(), Some("rvu -vp 0 0 5"));
+        assert_eq!(back.header.colorcorr, Some([1.1, 1.0, 0.9]));
+        assert_eq!(back.header.pixaspect, Some(1.0));
+    }
 }
