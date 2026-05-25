@@ -9,6 +9,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Round 131 (depth mode): Criterion micro-benchmark
+  `benches/encode.rs` driving the encoder fast path through all three
+  `RleMode` variants (`New`, `Old`, `Auto`) on three representative
+  inline-synthesised inputs (64×64 solid, 256×256 gradient, 1024×1024
+  solid). Headline numbers captured in the new README "Performance"
+  section. `criterion = "0.5"` added as a `[dev-dependencies]` entry
+  only (no runtime closure impact). No encoder algorithmic changes
+  this round; a `// PERF:` note on `reorient_for_axis_flags`'s
+  unconditional `pixels.to_vec()` (≈ 12 MiB alloc/memcpy per
+  1024×1024 default-axis encode) flags the obvious follow-up.
+
 - Round 5: typed `HdrHeader::view` slot for the Radiance `VIEW=` record
   (the renderer's view-parameter string — `-vp`, `-vd`, `-vu`, `-vh`,
   `-vv`, … flags concatenated). Previously fell through to

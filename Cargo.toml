@@ -30,3 +30,12 @@ default = ["registry"]
 # image-library use-cases that just want the standalone `parse_hdr`
 # / `encode_hdr` API.
 registry = ["dep:oxideav-core"]
+
+[dev-dependencies]
+# Criterion drives `benches/encode.rs`; bench-only, never pulled into
+# the runtime dependency closure.
+criterion = "0.5"
+
+[[bench]]
+name = "encode"
+harness = false

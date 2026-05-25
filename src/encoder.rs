@@ -239,6 +239,19 @@ pub fn encode_hdr_with_options(
     // on-disk width then becomes `height` (the height-many original
     // rows, now laid out one per output sample) and the on-disk height
     // becomes `width`. The axis-sign flips apply after the transpose.
+    //
+    // PERF: `reorient_for_axis_flags` does a `pixels.to_vec()` even on
+    // the default `-Y H +X W` axis (no flip, no transpose), which is
+    // the overwhelmingly common case. For a 1024×1024 image that's a
+    // ~12 MiB heap allocation + memcpy per encode call. Threading a
+    // `Cow<[f32]>` (or an explicit `Either<&[f32], Vec<f32>>`) through
+    // `write_pixel_rows` would skip the copy on the fast path; the
+    // round-131 bench shows a ~25% throughput cliff between the
+    // unflipped Y-first new-RLE path and the same payload's old-RLE
+    // counterpart (which exercises the same alloc but emits fewer
+    // bytes), strongly suggesting the alloc dominates. Deferred to a
+    // follow-up round per the round-131 dispatch's "no algorithmic
+    // changes this round" rule.
     let (out_w, out_h, oriented) = reorient_for_axis_flags(&image.pixels, w, h, &image.header);
     // The new-RLE marker addresses the *on-disk* scanline width, which
     // differs from the canonical image width for X-first headers — apply

@@ -83,6 +83,49 @@ let back = encode_hdr(&img).unwrap();
 // `back` round-trips img to the same shared-exponent precision.
 ```
 
+## Performance
+
+Criterion micro-benchmarks live in [`benches/encode.rs`](benches/encode.rs)
+and exercise the three `RleMode` paths (`New`, `Old`, `Auto`) on three
+representative inline-synthesised inputs. Numbers below were collected
+with `cargo bench --bench encode -- --warm-up-time 1 --measurement-time
+3` on an Apple Silicon laptop (release profile, single-threaded, no
+prefetch tweaks); they are reproducible run-to-run within a few percent
+but should be read as relative throughput between the modes rather
+than absolute platform numbers.
+
+| Input                                | RLE mode | Median time | Throughput (raw float bytes) |
+|--------------------------------------|---------:|------------:|-----------------------------:|
+| 64×64 solid colour                   | `New`    | 20.4 µs     | 2.24 GiB/s                   |
+| 64×64 solid colour                   | `Old`    | 17.1 µs     | 2.67 GiB/s                   |
+| 64×64 solid colour                   | `Auto`   | 19.8 µs     | 2.31 GiB/s                   |
+| 256×256 deterministic gradient       | `New`    | 356 µs      | 2.06 GiB/s                   |
+| 256×256 deterministic gradient       | `Old`    | 295 µs      | 2.48 GiB/s                   |
+| 256×256 deterministic gradient       | `Auto`   | 359 µs      | 2.04 GiB/s                   |
+| 1024×1024 solid colour (long runs)   | `New`    | 4.99 ms     | 2.35 GiB/s                   |
+| 1024×1024 solid colour (long runs)   | `Old`    | 3.95 ms     | 2.97 GiB/s                   |
+| 1024×1024 solid colour (long runs)   | `Auto`   | 4.98 ms     | 2.36 GiB/s                   |
+
+Observations:
+
+* `Auto` tracks `New` within noise on every input, as expected — the
+  three widths (64, 256, 1024) all sit comfortably inside the
+  `8..=32767` new-RLE addressable range, so `Auto` selects `New`.
+* `Old` is consistently the fastest variant in absolute time. The
+  output it produces is also typically larger (no per-scanline `0x02
+  0x02` marker + run-pack), so the fewer-cycles-per-pixel win comes
+  with a wire-size penalty — pick `New` (or `Auto`) for compression,
+  `Old` only when targeting legacy consumers that don't recognise the
+  post-1991 marker.
+* All paths sit in the 2.0–3.0 GiB/s range against the raw `f32` input
+  buffer, dominated by the `f32 → RGBE` shared-exponent conversion and
+  the per-pixel channel-deinterleave into the four single-channel
+  staging buffers `encode_scanline` consumes.
+* A `// PERF:` note in `src/encoder.rs` flags an unconditional
+  `pixels.to_vec()` inside `reorient_for_axis_flags` (≈ 12 MiB
+  alloc/memcpy per 1024×1024 encode) that's a candidate for a
+  follow-up round per the dispatch's no-algorithmic-changes rule.
+
 ## License
 
 MIT — see [`LICENSE`](LICENSE).
