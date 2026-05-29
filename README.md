@@ -121,10 +121,21 @@ Observations:
   buffer, dominated by the `f32 → RGBE` shared-exponent conversion and
   the per-pixel channel-deinterleave into the four single-channel
   staging buffers `encode_scanline` consumes.
-* A `// PERF:` note in `src/encoder.rs` flags an unconditional
-  `pixels.to_vec()` inside `reorient_for_axis_flags` (≈ 12 MiB
-  alloc/memcpy per 1024×1024 encode) that's a candidate for a
-  follow-up round per the dispatch's no-algorithmic-changes rule.
+* Round 179 closed the round-131 follow-up note about
+  `reorient_for_axis_flags`'s unconditional `pixels.to_vec()`:
+  `reorient_for_axis_flags` now returns `Cow<'_, [f32]>` and the
+  canonical `-Y H +X W` axis (the encoder default, no flip / no
+  transpose) is served as `Cow::Borrowed(&image.pixels)` — the
+  ~12 MiB alloc/memcpy per 1024×1024 default-axis encode is gone.
+  Mirrored / transposed headers still pay the allocation since the
+  on-disk layout genuinely differs from the canonical buffer.
+  Repeating the round-131 quick bench against the post-r179 encoder
+  shows the 1024×1024 solid `new_rle` path moving from a
+  median ~4.99 ms (2.35 GiB/s) to a median ~4.70 ms (2.49 GiB/s) on
+  the same Apple Silicon laptop, a ~6% improvement that lands
+  squarely on the alloc-elimination axis (the rgb_to_rgbe loop +
+  the four per-channel staging-buffer fills still dominate the
+  remaining wall time).
 
 ## License
 

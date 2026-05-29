@@ -20,6 +20,8 @@
 //! [`RleMode::Auto`] picks new-RLE for widths in that range and falls
 //! back to [`RleMode::Old`] for narrower / wider images.
 
+use std::borrow::Cow;
+
 use crate::error::{HdrError as Error, Result};
 use crate::header::{AxisSign, HdrHeader};
 use crate::image::{HdrImage, HdrPixelFormat};
@@ -240,18 +242,13 @@ pub fn encode_hdr_with_options(
     // rows, now laid out one per output sample) and the on-disk height
     // becomes `width`. The axis-sign flips apply after the transpose.
     //
-    // PERF: `reorient_for_axis_flags` does a `pixels.to_vec()` even on
-    // the default `-Y H +X W` axis (no flip, no transpose), which is
-    // the overwhelmingly common case. For a 1024×1024 image that's a
-    // ~12 MiB heap allocation + memcpy per encode call. Threading a
-    // `Cow<[f32]>` (or an explicit `Either<&[f32], Vec<f32>>`) through
-    // `write_pixel_rows` would skip the copy on the fast path; the
-    // round-131 bench shows a ~25% throughput cliff between the
-    // unflipped Y-first new-RLE path and the same payload's old-RLE
-    // counterpart (which exercises the same alloc but emits fewer
-    // bytes), strongly suggesting the alloc dominates. Deferred to a
-    // follow-up round per the round-131 dispatch's "no algorithmic
-    // changes this round" rule.
+    // Fast path: on the canonical `-Y H +X W` header (the overwhelmingly
+    // common case — encoder default) `reorient_for_axis_flags` returns
+    // a `Cow::Borrowed(&image.pixels)` so the previous round-131
+    // unconditional `pixels.to_vec()` (~12 MiB alloc/memcpy per
+    // 1024×1024 default-axis encode) is gone. Mirrored / transposed
+    // headers still pay the allocation since the on-disk layout
+    // genuinely differs from the canonical buffer.
     let (out_w, out_h, oriented) = reorient_for_axis_flags(&image.pixels, w, h, &image.header);
     // The new-RLE marker addresses the *on-disk* scanline width, which
     // differs from the canonical image width for X-first headers — apply
@@ -381,12 +378,19 @@ fn write_resolution(
 /// headers the returned width/height match the input; for X-first
 /// headers they are swapped (each on-disk scanline is one column of
 /// the canonical buffer).
-fn reorient_for_axis_flags(
-    pixels: &[f32],
+///
+/// The fast path — the canonical `-Y H +X W` default (no flip, no
+/// transpose) — returns the caller's buffer as a `Cow::Borrowed`,
+/// skipping the ~12 MiB alloc/memcpy that would otherwise dominate a
+/// 1024×1024 default-axis encode. Mirrored / transposed cases still
+/// produce an owned reordering since the on-disk layout genuinely
+/// differs from the canonical buffer.
+fn reorient_for_axis_flags<'a>(
+    pixels: &'a [f32],
     width: usize,
     height: usize,
     header: &HdrHeader,
-) -> (usize, usize, Vec<f32>) {
+) -> (usize, usize, Cow<'a, [f32]>) {
     let flip_y = header.y_sign == AxisSign::Increasing;
     let flip_x = header.x_sign == AxisSign::Decreasing;
 
@@ -414,11 +418,13 @@ fn reorient_for_axis_flags(
                 m[dst + 2] = pixels[src + 2];
             }
         }
-        return (out_w, out_h, m);
+        return (out_w, out_h, Cow::Owned(m));
     }
 
     if !flip_x && !flip_y {
-        return (width, height, pixels.to_vec());
+        // Canonical orientation — no reordering needed, hand the
+        // caller's buffer back unmodified.
+        return (width, height, Cow::Borrowed(pixels));
     }
     let mut m = vec![0.0_f32; pixels.len()];
     for y in 0..height {
@@ -432,7 +438,7 @@ fn reorient_for_axis_flags(
             m[dst + 2] = pixels[src + 2];
         }
     }
-    (width, height, m)
+    (width, height, Cow::Owned(m))
 }
 
 fn write_pixel_rows(
@@ -559,6 +565,67 @@ mod tests {
             back.header.view.as_deref(),
             Some("rvu -vp 0 0 10 -vd 0 0 -1 -vu 0 1 0")
         );
+    }
+
+    #[test]
+    fn reorient_canonical_axis_borrows_input_buffer() {
+        // The default `-Y H +X W` axis must not allocate a new pixel
+        // buffer — `reorient_for_axis_flags` should hand the caller's
+        // slice back as `Cow::Borrowed`. The pointer + length equality
+        // check below is what the round-179 zero-copy refactor is
+        // about; if a future change reintroduces an unconditional
+        // `to_vec()` this test catches it.
+        let img = pattern(16, 4);
+        let (out_w, out_h, oriented) = reorient_for_axis_flags(
+            &img.pixels,
+            img.width as usize,
+            img.height as usize,
+            &img.header,
+        );
+        assert_eq!(out_w, img.width as usize);
+        assert_eq!(out_h, img.height as usize);
+        assert!(matches!(oriented, Cow::Borrowed(_)));
+        // Identity of the borrow: same ptr + same length means the
+        // encoder will read straight out of the caller's `Vec<f32>`.
+        let canon_ptr = img.pixels.as_ptr();
+        let canon_len = img.pixels.len();
+        let oriented_ptr = oriented.as_ptr();
+        let oriented_len = oriented.len();
+        assert_eq!(canon_ptr, oriented_ptr);
+        assert_eq!(canon_len, oriented_len);
+    }
+
+    #[test]
+    fn reorient_flipped_axis_returns_owned_reordering() {
+        // A non-canonical axis (here `+Y H +X W` — vertical mirror)
+        // genuinely needs to reorder the buffer, so the slow path
+        // continues to return an owned `Vec<f32>` wrapped in
+        // `Cow::Owned`. Roundtrip the mirror through the decoder so the
+        // ownership change is observably correct, not just a tag check.
+        let mut img = pattern(16, 4);
+        img.header.y_sign = AxisSign::Increasing;
+        let (_out_w, _out_h, oriented) = reorient_for_axis_flags(
+            &img.pixels,
+            img.width as usize,
+            img.height as usize,
+            &img.header,
+        );
+        assert!(matches!(oriented, Cow::Owned(_)));
+        let bytes = encode_hdr(&img).unwrap();
+        let back = parse_hdr(&bytes).unwrap();
+        assert_eq!(back.width, img.width);
+        assert_eq!(back.height, img.height);
+        assert_eq!(back.header.y_sign, AxisSign::Increasing);
+        // Sample a handful of pixels to confirm the mirror round-trips.
+        for y in 0..img.height as usize {
+            for x in 0..img.width as usize {
+                let i = (y * img.width as usize + x) * 3;
+                let a = img.pixels[i];
+                let b = back.pixels[i];
+                let err = (a - b).abs();
+                assert!(err < 0.02, "mirror y={y} x={x}: {a} vs {b}");
+            }
+        }
     }
 
     #[test]

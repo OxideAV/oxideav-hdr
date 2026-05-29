@@ -7,6 +7,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- Round 179: `encode_hdr_with_options` no longer allocates a fresh
+  `Vec<f32>` for the canonical `-Y H +X W` axis (the encoder default).
+  `reorient_for_axis_flags` returns `Cow<'_, [f32]>` and the fast path
+  now borrows `&image.pixels` directly — the ~12 MiB heap alloc +
+  memcpy per 1024×1024 default-axis encode that the round-131 PERF
+  note flagged is gone. Mirrored / transposed axes still pay the
+  allocation since the on-disk layout genuinely differs from the
+  canonical buffer. Two new unit tests
+  (`reorient_canonical_axis_borrows_input_buffer`,
+  `reorient_flipped_axis_returns_owned_reordering`) lock the
+  borrow-vs-own contract in place by pointer-identity check + by
+  exercising the slow path's roundtrip. Re-running the round-131
+  Criterion bench against the new fast path shows the
+  1024×1024 solid `new_rle` median moving 4.99 ms → 4.70 ms (a ~6%
+  throughput improvement against the raw `f32` input buffer); the
+  remaining cycles are dominated by `rgb_to_rgbe` plus the four
+  per-channel staging-buffer fills inside `write_pixel_rows`.
+
 ### Added
 
 - Round 131 (depth mode): Criterion micro-benchmark
