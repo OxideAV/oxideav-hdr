@@ -27,6 +27,26 @@
 //! * Greg Ward, "The RADIANCE Picture File Format", radsite.lbl.gov
 //!   (the `WHTEFFICACY = 179.0` and `RGB ↔ XYZ` constants used by the
 //!   reference encoder/decoder pair).
+//!
+//! ## Photometric luminance
+//!
+//! The Radiance reference manual section "Physical interpretation" defines
+//! a fixed photometric conversion that turns a `32-bit_rle_rgbe` pixel
+//! into lumens / steradian / m²:
+//!
+//! ```text
+//! luminance = 179 * (0.265*R + 0.670*G + 0.065*B)        (for FORMAT=32-bit_rle_rgbe)
+//! luminance = 179 * Y                                    (for FORMAT=32-bit_rle_xyze)
+//! ```
+//!
+//! 179 lumens/watt is Radiance's `WHTEFFICACY` — the standard luminous
+//! efficacy of equal-energy white. The three RGBE coefficients are the
+//! photopic weights of Greg Ward's reference RGB primaries onto CIE Y.
+//! XYZE files don't need the 0.265/0.670/0.065 step because their Y
+//! channel is already CIE Y; the 179× factor is the only remaining
+//! radiance → photometric conversion. See [`luminance_lm_per_sr_per_m2`]
+//! for the per-pixel helper and [`crate::HdrImage::luminance_buffer`]
+//! for the whole-image variant.
 
 /// Identifier for one of the supported RGB working spaces.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -133,6 +153,45 @@ pub fn convert_image_rgb_to_xyz(image: &mut crate::HdrImage, space: RgbColorSpac
     image.header.format = crate::HdrFormat::Xyze;
 }
 
+/// Radiance's standard luminous efficacy of equal-energy white,
+/// `WHTEFFICACY` in `src/common/color.h`. The constant that turns
+/// reference-encoder watts/sr/m² into lumens/sr/m².
+pub const WHTEFFICACY: f32 = 179.0;
+
+/// Photopic weights that project Greg Ward's reference RGB primaries
+/// onto CIE Y. They appear in the Radiance reference manual section
+/// "Physical interpretation" as the per-primary multipliers used by the
+/// canonical `luminance(col)` macro: `Y = 0.265*R + 0.670*G + 0.065*B`.
+/// Order is `(R, G, B)`.
+pub const RGBE_BRIGHT_COEFFS: [f32; 3] = [0.265, 0.670, 0.065];
+
+/// Photometric luminance, in lumens per steradian per m², of a single
+/// scene-referred pixel from a Radiance picture.
+///
+/// `format` selects which of the two photometric reductions documented
+/// in the Radiance reference manual is applied:
+///
+/// * [`crate::HdrFormat::Rgbe`] — the per-primary projection
+///   `179 * (0.265*R + 0.670*G + 0.065*B)`.
+/// * [`crate::HdrFormat::Xyze`] — pass-through `179 * Y` because the
+///   Y channel of an XYZE file is already CIE Y.
+///
+/// Negative inputs (out-of-gamut samples) are returned as-is; callers
+/// that need a clamped photometric value should `max(0.0)` after the
+/// call.
+#[inline]
+pub fn luminance_lm_per_sr_per_m2(pixel: [f32; 3], format: crate::HdrFormat) -> f32 {
+    match format {
+        crate::HdrFormat::Rgbe => {
+            WHTEFFICACY
+                * (RGBE_BRIGHT_COEFFS[0] * pixel[0]
+                    + RGBE_BRIGHT_COEFFS[1] * pixel[1]
+                    + RGBE_BRIGHT_COEFFS[2] * pixel[2])
+        }
+        crate::HdrFormat::Xyze => WHTEFFICACY * pixel[1],
+    }
+}
+
 #[inline]
 fn apply_matrix(m: [[f32; 3]; 3], v: [f32; 3]) -> [f32; 3] {
     [
@@ -206,6 +265,64 @@ mod tests {
         assert!(approx(xyz[0], 0.4124564, 1e-5));
         assert!(approx(xyz[1], 0.2126729, 1e-5));
         assert!(approx(xyz[2], 0.0193339, 1e-5));
+    }
+
+    #[test]
+    fn luminance_rgbe_uses_radiance_coefficients() {
+        // Worked example from the picture-file-format reference:
+        // luminance = 179 * (0.265*R + 0.670*G + 0.065*B).
+        // Punching (1, 1, 1) through that formula yields
+        // 179 * (0.265 + 0.670 + 0.065) = 179 * 1.0 = 179.
+        let y = luminance_lm_per_sr_per_m2([1.0, 1.0, 1.0], crate::HdrFormat::Rgbe);
+        assert!((y - 179.0).abs() < 1e-3, "expected 179, got {y}");
+    }
+
+    #[test]
+    fn luminance_rgbe_isolates_each_channel() {
+        // Each primary in isolation should yield its weighted contribution.
+        let lr = luminance_lm_per_sr_per_m2([1.0, 0.0, 0.0], crate::HdrFormat::Rgbe);
+        let lg = luminance_lm_per_sr_per_m2([0.0, 1.0, 0.0], crate::HdrFormat::Rgbe);
+        let lb = luminance_lm_per_sr_per_m2([0.0, 0.0, 1.0], crate::HdrFormat::Rgbe);
+        assert!((lr - 179.0 * 0.265).abs() < 1e-3, "R: {lr}");
+        assert!((lg - 179.0 * 0.670).abs() < 1e-3, "G: {lg}");
+        assert!((lb - 179.0 * 0.065).abs() < 1e-3, "B: {lb}");
+        // G dominates: 0.670 > 0.265 > 0.065.
+        assert!(lg > lr);
+        assert!(lr > lb);
+    }
+
+    #[test]
+    fn luminance_xyze_is_179_times_y() {
+        // XYZE files: the Y primary is already lumens/sr/m²; the only
+        // remaining conversion is the 179× scale.
+        let y = luminance_lm_per_sr_per_m2([0.1, 1.0, 0.2], crate::HdrFormat::Xyze);
+        assert!((y - 179.0).abs() < 1e-3, "expected 179, got {y}");
+        // Doubling Y doubles the luminance; X and Z are ignored.
+        let y2 = luminance_lm_per_sr_per_m2([5.0, 2.0, 5.0], crate::HdrFormat::Xyze);
+        assert!((y2 - 358.0).abs() < 1e-3, "expected 358, got {y2}");
+    }
+
+    #[test]
+    fn luminance_scales_linearly_with_input() {
+        // Doubling every channel doubles the photometric luminance — the
+        // formula is linear in the float radiance values.
+        let base = luminance_lm_per_sr_per_m2([0.50, 0.25, 0.10], crate::HdrFormat::Rgbe);
+        let dbl = luminance_lm_per_sr_per_m2([1.00, 0.50, 0.20], crate::HdrFormat::Rgbe);
+        assert!((dbl - 2.0 * base).abs() < 1e-3);
+    }
+
+    #[test]
+    fn whtefficacy_constant_matches_reference() {
+        // The constant is fixed at 179 lm/W in the reference manual; lock
+        // it down so an accidental edit shows up in CI.
+        assert!((WHTEFFICACY - 179.0).abs() < 1e-6);
+        // Coefficients sum to 1 by construction (they project onto the
+        // E white point of Ward's primaries).
+        let sum = RGBE_BRIGHT_COEFFS[0] + RGBE_BRIGHT_COEFFS[1] + RGBE_BRIGHT_COEFFS[2];
+        assert!(
+            (sum - 1.0).abs() < 1e-6,
+            "coeffs sum to {sum}, expected 1.0"
+        );
     }
 
     #[test]

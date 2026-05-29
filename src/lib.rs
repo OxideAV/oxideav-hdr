@@ -59,8 +59,9 @@ pub use image::{HdrImage, HdrPixelFormat};
 pub use rgbe::{rgb_to_rgbe, rgbe_to_rgb};
 pub use tonemap::{tone_map, ToneMap};
 pub use xyz::{
-    convert_image_rgb_to_xyz, convert_image_xyz_to_rgb, rgb_to_xyz, rgb_to_xyz_matrix, xyz_to_rgb,
-    xyz_to_rgb_matrix, RgbColorSpace,
+    convert_image_rgb_to_xyz, convert_image_xyz_to_rgb, luminance_lm_per_sr_per_m2, rgb_to_xyz,
+    rgb_to_xyz_matrix, xyz_to_rgb, xyz_to_rgb_matrix, RgbColorSpace, RGBE_BRIGHT_COEFFS,
+    WHTEFFICACY,
 };
 
 #[cfg(feature = "registry")]

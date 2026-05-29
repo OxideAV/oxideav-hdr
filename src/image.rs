@@ -68,6 +68,35 @@ mod tests {
     }
 
     #[test]
+    fn luminance_buffer_rgbe_matches_per_pixel_formula() {
+        // Three pixels at known radiance values; the buffer should be
+        // 179 * (0.265*R + 0.670*G + 0.065*B) for each.
+        let pixels = vec![1.0, 1.0, 1.0, 0.5, 0.25, 0.10, 0.0, 1.0, 0.0];
+        let img = HdrImage::new_rgb96f(3, 1, pixels);
+        let lum = img.luminance_buffer();
+        assert_eq!(lum.len(), 3);
+        // Pixel 0: 179 * 1.0 = 179.
+        assert!((lum[0] - 179.0).abs() < 1e-3);
+        // Pixel 1: 179 * (0.265*0.5 + 0.670*0.25 + 0.065*0.10)
+        let p1 = 179.0 * (0.265 * 0.5 + 0.670 * 0.25 + 0.065 * 0.10);
+        assert!((lum[1] - p1).abs() < 1e-2);
+        // Pixel 2: pure green, 179 * 0.670 = 119.93.
+        assert!((lum[2] - 179.0 * 0.670).abs() < 1e-2);
+    }
+
+    #[test]
+    fn luminance_buffer_xyze_skips_per_primary_projection() {
+        use crate::HdrFormat;
+        let pixels = vec![0.1, 0.5, 0.2, 0.3, 1.0, 0.4];
+        let mut img = HdrImage::new_rgb96f(2, 1, pixels);
+        img.header.format = HdrFormat::Xyze;
+        let lum = img.luminance_buffer();
+        // XYZE: luminance is 179 * Y exactly.
+        assert!((lum[0] - 179.0 * 0.5).abs() < 1e-2);
+        assert!((lum[1] - 179.0 * 1.0).abs() < 1e-2);
+    }
+
+    #[test]
     fn apply_colorcorr_unit_vector_is_a_no_op() {
         let mut img = HdrImage::new_rgb96f(1, 1, vec![0.7, 0.5, 0.3]);
         img.header.colorcorr = Some([1.0, 1.0, 1.0]);
@@ -149,6 +178,33 @@ impl HdrImage {
                 }
             }
         }
+    }
+
+    /// Allocate a fresh `width * height` buffer of per-pixel photometric
+    /// luminance values, in lumens per steradian per m², computed from
+    /// the picture's float channels per the Radiance reference-manual
+    /// formula:
+    ///
+    /// ```text
+    /// FORMAT=32-bit_rle_rgbe -> 179 * (0.265*R + 0.670*G + 0.065*B)
+    /// FORMAT=32-bit_rle_xyze -> 179 * Y
+    /// ```
+    ///
+    /// The reduction is the same one Radiance's `luminance(col)` macro
+    /// produces. `header.format` selects which branch is applied so the
+    /// caller doesn't have to track it explicitly. Out-of-gamut samples
+    /// (`R<0`, `G<0`, `B<0`) are passed through linearly — the formula
+    /// is `Σ a_i * c_i` and inherits whatever sign the input has.
+    pub fn luminance_buffer(&self) -> Vec<f32> {
+        let n = (self.width as usize) * (self.height as usize);
+        let mut out = Vec::with_capacity(n);
+        for px in self.pixels.chunks_exact(3) {
+            out.push(crate::xyz::luminance_lm_per_sr_per_m2(
+                [px[0], px[1], px[2]],
+                self.header.format,
+            ));
+        }
+        out
     }
 
     /// Apply the header's `COLORCORR` per-channel multiplier to every

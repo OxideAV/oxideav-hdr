@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Round 189: photometric-luminance helper
+  `oxideav_hdr::luminance_lm_per_sr_per_m2(pixel, format)` plus the
+  `HdrImage::luminance_buffer()` whole-image variant. Implements the
+  Radiance reference manual's "Physical interpretation" reduction —
+  `179 * (0.265*R + 0.670*G + 0.065*B)` for `FORMAT=32-bit_rle_rgbe`
+  and `179 * Y` for `FORMAT=32-bit_rle_xyze` — so callers can convert
+  decoded scene-referred radiance into lumens / steradian / m² without
+  re-deriving the coefficients. Re-exports the underlying
+  `WHTEFFICACY` (= 179.0 lm/W) and `RGBE_BRIGHT_COEFFS` constants for
+  consumers that want to apply the formula by hand. Six new unit
+  tests pin the (R, G, B) weights to the documented values, exercise
+  the XYZE pass-through branch, and lock the `WHTEFFICACY` constant
+  in place against accidental edit. The reduction matches Radiance's
+  `luminance(col)` macro in `src/common/color.h`.
+
 ### Changed
 
 - Round 179: `encode_hdr_with_options` no longer allocates a fresh

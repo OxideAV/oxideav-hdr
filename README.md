@@ -40,6 +40,7 @@ reference C code consulted.
 | XYZE ↔ RGB (sRGB / Radiance) |  -   | helpers |
 | `Primaries::SRGB` / `RADIANCE` / `P3_D65` / `REC2020` constants | n/a | constants |
 | Tone-mapping (Linear / Gamma / Reinhard / ReinhardExtended / ReinhardLuminance / Hable / Drago / ACES) | - | helpers |
+| Radiance photometric luminance (`179 * (0.265 R + 0.670 G + 0.065 B)` for RGBE; `179 * Y` for XYZE) | helper (`luminance_lm_per_sr_per_m2`, `HdrImage::luminance_buffer`) | n/a |
 
 Cross-validated against ImageMagick 7's HDR codec (encoder output is
 decodable by `magick`, ImageMagick-written `.hdr` files round-trip
