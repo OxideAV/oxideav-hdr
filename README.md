@@ -47,6 +47,20 @@ decodable by `magick`, ImageMagick-written `.hdr` files round-trip
 through our decoder, XYZE↔RGB matrix tracks ImageMagick's chroma
 adaptation within the format's shared-exponent precision).
 
+Round 192 also stages three committed on-disk regression fixtures
+under [`tests/fixtures/`](tests/fixtures/) (`gradient_32x16_newrle.hdr`,
+`solid_16x8_oldrle.hdr`, `gradient_32x16_crlf_plusY.hdr`). Between
+them they exercise every typed `KEY=VALUE` slot the decoder
+recognises plus an untyped extra record, both `\n` and `\r\n` line
+endings, the canonical `-Y H +X W` and the non-default `+Y H +X W`
+axis orders, and both the new-RLE and old-RLE pixel-section
+encodings. The matching `tests/fixture_decode.rs` integration test
+decodes each one, asserts the recovered structure, and re-encodes it
+with byte-identity against the committed file — drift in either
+direction is caught by a file-level diff rather than a subtle
+pixel-comparison regression. Regenerate after an intentional
+wire-format change with `cargo run --example gen_fixtures`.
+
 ## Standalone vs registry-integrated
 
 Default `registry` Cargo feature on:

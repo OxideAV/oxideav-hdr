@@ -9,6 +9,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Round 192: staged on-disk `.hdr` regression-anchor fixtures under
+  `crates/oxideav-hdr/tests/fixtures/` (`gradient_32x16_newrle.hdr`,
+  `solid_16x8_oldrle.hdr`, `gradient_32x16_crlf_plusY.hdr`) plus a
+  matching `tests/fixture_decode.rs` integration test that decodes
+  each one, asserts the recovered dimensions / axis flags / typed
+  header slots / pixel-magnitude extremes, then re-encodes the
+  decoded image with the same options and asserts byte-identity
+  against the committed file. The combined chain pins both the
+  decoder's parse logic and the encoder's emit logic to a single
+  committed reference per RLE flavour. `examples/gen_fixtures.rs`
+  regenerates the bytes from the same deterministic synthetic inputs
+  whenever an intentional wire-format change is made (`cargo run
+  --example gen_fixtures`). The three fixtures between them exercise
+  every typed `KEY=VALUE` slot the decoder recognises (FORMAT /
+  EXPOSURE / GAMMA / SOFTWARE / VIEW / PIXASPECT / COLORCORR /
+  PRIMARIES) plus an untyped `OXIDEAV=` extra record, both `\n` and
+  `\r\n` line endings, the canonical `-Y H +X W` axis order and the
+  non-default `+Y H +X W` (bottom-up) order, and both the new-RLE
+  and old-RLE pixel-section encodings. Closes the #1057 staged-
+  fixture follow-up. Total committed fixture footprint: ~4.6 KiB
+  across three files.
+
 - Round 189: photometric-luminance helper
   `oxideav_hdr::luminance_lm_per_sr_per_m2(pixel, format)` plus the
   `HdrImage::luminance_buffer()` whole-image variant. Implements the
