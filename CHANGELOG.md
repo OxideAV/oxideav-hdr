@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.0.3](https://github.com/OxideAV/oxideav-hdr/compare/v0.0.2...v0.0.3) - 2026-05-30
+
+### Other
+
+- round 192 — on-disk .hdr regression-anchor fixtures + decode/re-encode test
+- round 189 — Radiance photometric reduction helpers
+- round 179 — zero-copy fast path on canonical axis
+- round 131 — Criterion encoder fast-path bench (encode_hdr new/old/auto RLE)
+- round 5: VIEW header slot + CRLF write + apply_exposure/colorcorr helpers
+- round 4: X-first axis flags + EXPOSURE/COLORCORR stacking + P3-D65/Rec2020 primaries + ReinhardLuminance tonemap
+- round 3: COLORCORR + PRIMARIES header fields, Hable / Drago / Reinhard-extended tonemaps, RleMode::Auto, y_sign/x_sign encoder honour
+- separate round 2 entries from 0.0.2 section
+- Round 2: old-RLE encoder + XYZE↔RGB + tone-mapping helpers
+
 ### Added
 
 - Round 192: staged on-disk `.hdr` regression-anchor fixtures under
