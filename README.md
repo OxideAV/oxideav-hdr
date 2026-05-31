@@ -17,7 +17,7 @@ Clean-room implementation against the published format documentation
 Radiance source / `image` crate's `hdr` submodule / Greg Ward's
 reference C code consulted.
 
-## Coverage (round 5)
+## Coverage (round 196)
 
 | Feature                      | Read | Write |
 |------------------------------|:----:|:-----:|
@@ -34,6 +34,7 @@ reference C code consulted.
 | New RLE (`0x02 0x02 hi lo`)  |  Y   |   Y   |
 | Old RLE (sentinel pixels)    |  Y   |   Y (`RleMode::Old`) |
 | Auto-RLE (width heuristic)   |  -   |   Y (`RleMode::Auto`) |
+| Uncompressed (flat `4 * W` byte) scanlines | Y (`parse_hdr_with_options(_, FallbackMode::Uncompressed)`) | Y (`RleMode::Uncompressed`) |
 | CRLF line endings            |  Y   |   Y (`LineEnding::Crlf`) |
 | `HdrImage::apply_exposure`   |  decode helper |  n/a |
 | `HdrImage::apply_colorcorr`  |  decode helper |  n/a |
@@ -49,17 +50,25 @@ adaptation within the format's shared-exponent precision).
 
 Round 192 also stages three committed on-disk regression fixtures
 under [`tests/fixtures/`](tests/fixtures/) (`gradient_32x16_newrle.hdr`,
-`solid_16x8_oldrle.hdr`, `gradient_32x16_crlf_plusY.hdr`). Between
-them they exercise every typed `KEY=VALUE` slot the decoder
-recognises plus an untyped extra record, both `\n` and `\r\n` line
-endings, the canonical `-Y H +X W` and the non-default `+Y H +X W`
-axis orders, and both the new-RLE and old-RLE pixel-section
-encodings. The matching `tests/fixture_decode.rs` integration test
+`solid_16x8_oldrle.hdr`, `gradient_32x16_crlf_plusY.hdr`), and round
+196 adds a fourth (`flat_4x2_uncompressed.hdr`) that pins the third
+on-disk scanline flavour from the staged spec: 4 × 2 pixels written
+as a flat `4 * width` byte RGBE quad array with no marker and no
+sentinels, paired with the new `RleMode::Uncompressed` writer + the
+`FallbackMode::Uncompressed` reader option. Between them they exercise
+every typed `KEY=VALUE` slot the decoder recognises plus an untyped
+extra record, both `\n` and `\r\n` line endings, the canonical
+`-Y H +X W` and the non-default `+Y H +X W` axis orders, and all
+three pixel-section encodings the staged spec enumerates (new-RLE,
+old-RLE, uncompressed). The matching `tests/fixture_decode.rs` integration test
 decodes each one, asserts the recovered structure, and re-encodes it
 with byte-identity against the committed file — drift in either
 direction is caught by a file-level diff rather than a subtle
-pixel-comparison regression. Regenerate after an intentional
-wire-format change with `cargo run --example gen_fixtures`.
+pixel-comparison regression. The uncompressed fixture's pixel
+section is asserted to be exactly `4 * W * H` bytes (no marker, no
+sentinels), confirming the encoder honours the requested flavour at
+the on-disk byte level. Regenerate after an intentional wire-format
+change with `cargo run --example gen_fixtures`.
 
 ## Standalone vs registry-integrated
 

@@ -4,8 +4,8 @@
 //! catches accidental visibility regressions.
 
 use oxideav_hdr::{
-    encode_hdr, encode_hdr_with_options, encode_hdr_with_rle, parse_hdr, AxisSign, HdrImage,
-    HdrPixelFormat, LineEnding, RleMode,
+    encode_hdr, encode_hdr_with_options, encode_hdr_with_rle, parse_hdr, parse_hdr_with_options,
+    AxisSign, FallbackMode, HdrImage, HdrPixelFormat, LineEnding, RleMode,
 };
 
 /// Same gradient construction as the in-crate unit tests, kept here to
@@ -314,6 +314,42 @@ fn apply_exposure_and_colorcorr_chain_after_decode() {
         assert!((px[0] - 1.0).abs() < 0.02, "R: {}", px[0]);
         assert!((px[1] - 0.5).abs() < 0.02, "G: {}", px[1]);
         assert!((px[2] - 0.25).abs() < 0.02, "B: {}", px[2]);
+    }
+}
+
+#[test]
+fn uncompressed_rle_roundtrips_narrow_image_through_public_api() {
+    // Round 196: end-to-end exercise of `RleMode::Uncompressed` +
+    // `FallbackMode::Uncompressed`. Width 4 is too narrow for the
+    // new-RLE marker (which needs `8 <= W <= 32767`), and we want the
+    // decoder to NOT engage the old-RLE sentinel grammar. The on-disk
+    // pixel section should be exactly `4 * W * H` bytes.
+    let w = 4_u32;
+    let h = 3_u32;
+    let mut pixels = Vec::with_capacity((w * h * 3) as usize);
+    for i in 0..(w * h) as usize {
+        let v = (i as f32 + 1.0) * 0.05;
+        pixels.push(v);
+        pixels.push(v * 0.5);
+        pixels.push(v * 0.25);
+    }
+    let src = HdrImage::new_rgb96f(w, h, pixels.clone());
+    let bytes = encode_hdr_with_rle(&src, RleMode::Uncompressed).unwrap();
+
+    // Compute the on-disk pixel section size and confirm it equals
+    // 4 * W * H — no marker, no sentinels.
+    let blank = bytes.windows(2).position(|w| w == b"\n\n").unwrap();
+    let res_end = blank + 2 + bytes[blank + 2..].iter().position(|&b| b == b'\n').unwrap();
+    let payload_len = bytes.len() - (res_end + 1);
+    assert_eq!(payload_len, (w * h * 4) as usize);
+
+    let back = parse_hdr_with_options(&bytes, FallbackMode::Uncompressed).unwrap();
+    assert_eq!(back.width, w);
+    assert_eq!(back.height, h);
+    for (i, (a, b)) in pixels.iter().zip(back.pixels.iter()).enumerate() {
+        let err = (a - b).abs();
+        let rel = err / a.max(1e-30);
+        assert!(rel < 0.03, "pixel {i}: src={a} back={b} rel={rel}");
     }
 }
 

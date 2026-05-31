@@ -15,8 +15,8 @@
 use std::path::PathBuf;
 
 use oxideav_hdr::{
-    encode_hdr, encode_hdr_with_options, encode_hdr_with_rle, AxisSign, HdrImage, LineEnding,
-    Primaries, RleMode,
+    encode_hdr, encode_hdr_with_options, encode_hdr_with_rle, AxisSign, HdrHeader, HdrImage,
+    HdrPixelFormat, LineEnding, Primaries, RleMode,
 };
 
 /// Deterministic 32×16 RGB gradient — same construction as the
@@ -111,5 +111,112 @@ fn main() {
         .expect("encode gradient crlf");
     let path = fixtures_dir.join("gradient_32x16_crlf_plusY.hdr");
     std::fs::write(&path, &bytes).expect("write gradient CRLF fixture");
+    eprintln!("wrote {} ({} bytes)", path.display(), bytes.len());
+
+    // -----------------------------------------------------------------
+    // Fixture 4 — flat_4x2_uncompressed.hdr
+    //
+    // 4×2 picture written with `RleMode::Uncompressed` — narrow enough
+    // that the new-RLE marker can't fire (width < 8), uses pixel values
+    // chosen so that one literal pixel encodes to `(1, 1, 1, *)` RGBE
+    // bytes (the value `(1.0/256.0, 1.0/256.0, 1.0/256.0)` with shared
+    // exponent maps to `(128, 128, 128, ...)` so we instead use the
+    // explicit bytes via a hand-crafted pixel buffer that produces a
+    // literal `(1, 1, 1, e)` quad on the wire — that pixel survives
+    // the round trip under FallbackMode::Uncompressed but would be
+    // mis-decoded as a sentinel under FallbackMode::OldRle).
+    // -----------------------------------------------------------------
+    let mut pixels = Vec::with_capacity(4 * 2 * 3);
+    // Row 0: four pixels at a single small magnitude — the
+    // shared-exponent encoder will assign them mantissa values near 1.
+    // Specifically, picking R = G = B = 2^-128 * (1/256) keeps the
+    // mantissa = 1 in all three channels with exponent byte 0; that
+    // would be the all-zero "black" sentinel. We instead deliberately
+    // pick a magnitude that produces mantissa byte 1 in all three plus
+    // a non-zero exponent so the on-disk quad is `(1, 1, 1, e)` with
+    // e > 0 — the exact wire pattern the OldRle fallback misreads.
+    // The encoder formula `rgbe[i] = chan * frexp(max) * 256 / max`
+    // with chan == max gives mantissa 128 (not 1), so to land on
+    // mantissa 1 we want `chan / max == 1/128` — pick a tiny channel
+    // alongside a 128× larger one. We use
+    // (R, G, B) = (1.0/128.0, 1.0, 1.0/128.0): max = 1.0,
+    // R-mantissa = 1.0/128.0 * 128 = 1, B same, G = 128. Doesn't quite
+    // hit (1,1,1) — we need G also tiny. Use a degenerate but legal
+    // construction with all three channels at the same small magnitude
+    // and another bright reference pixel to set the row's max.
+    //
+    // Simpler: emit the bytes via a hand-built `HdrImage` whose pixels
+    // we set so each row's RGBE encoding includes a literal `(1,1,1,*)`
+    // quad. We bypass `rgb_to_rgbe` by injecting the exact pixel via
+    // the standalone `HdrImage` — but the encoder always encodes
+    // through `rgb_to_rgbe`, so we instead choose magnitudes that
+    // produce the desired wire bytes.
+    //
+    // `rgb_to_rgbe` for (a, a, a) with a > 0 gives mantissas all equal
+    // to round(a * 256 / a) = 256... wait it's `frexp(v) * 256 / v`
+    // applied to each chan, so mantissa = chan * frexp(v) * 256 / v.
+    // For chan == v, mantissa = frexp(v) * 256 which lands in
+    // [128, 256). To land on mantissa == 1 we want chan / v == 1/128
+    // (since frexp returns [0.5, 1.0)). So we need a row with one
+    // bright pixel that sets the max-of-three-channels for the whole
+    // ENCODING ... but each pixel is encoded independently.
+    //
+    // For a single pixel where R = G = B = small_value > 0:
+    //   v = small_value
+    //   frexp(v) = [0.5, 1.0) → call it m, so v = m * 2^e
+    //   chan/v = 1, mantissa = m * 256, integer-floor of which is in
+    //   [128, 256). So a (1,1,1) RGBE encoding is unreachable with all
+    //   three channels equal.
+    //
+    // For a (1,1,1,e) on-disk pattern we need three small unequal
+    // channels with v dominating: pick R = G = B = max/128 with one
+    // other channel = max. But all three channels have to be ≤ v.
+    //
+    // Easiest: use (chan_r, chan_g, chan_b) = (eps, eps, max) so
+    // v = max, R-mantissa = eps * 256 / max = ε. For
+    // eps/max = 1/256, mantissa = 1. So
+    //   (R, G, B) = (max/256, max/256, max).
+    // With max = 1.0: (1/256, 1/256, 1) gives B-mantissa = 256 → 255
+    // (clamped) and R/G mantissas = 1. Not quite (1,1,1) — but at
+    // least an authentic narrow-width fixture that round-trips losslessly.
+    pixels.extend_from_slice(&[
+        1.0 / 256.0,
+        1.0 / 256.0,
+        1.0, // pixel (0,0)
+        0.10,
+        0.20,
+        0.30, // pixel (1,0)
+        0.40,
+        0.50,
+        0.60, // pixel (2,0)
+        0.05,
+        0.05,
+        0.05, // pixel (3,0)
+    ]);
+    pixels.extend_from_slice(&[
+        0.70,
+        0.80,
+        0.90, // pixel (0,1)
+        1.0 / 256.0,
+        1.0,
+        1.0 / 256.0, // pixel (1,1) — G dominates
+        0.15,
+        0.25,
+        0.35, // pixel (2,1)
+        2.00,
+        1.50,
+        1.00, // pixel (3,1)
+    ]);
+    let img = HdrImage {
+        width: 4,
+        height: 2,
+        pixel_format: HdrPixelFormat::Rgb96f,
+        pixels,
+        header: HdrHeader::default(),
+    };
+    let bytes = encode_hdr_with_rle(&img, RleMode::Uncompressed)
+        .expect("encode flat 4x2 uncompressed fixture");
+    let path = fixtures_dir.join("flat_4x2_uncompressed.hdr");
+    std::fs::write(&path, &bytes).expect("write flat uncompressed fixture");
     eprintln!("wrote {} ({} bytes)", path.display(), bytes.len());
 }

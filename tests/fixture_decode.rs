@@ -20,8 +20,8 @@
 use std::path::PathBuf;
 
 use oxideav_hdr::{
-    encode_hdr, encode_hdr_with_options, encode_hdr_with_rle, parse_hdr, AxisSign, HdrFormat,
-    HdrPixelFormat, LineEnding, RleMode,
+    encode_hdr, encode_hdr_with_options, encode_hdr_with_rle, parse_hdr, parse_hdr_with_options,
+    AxisSign, FallbackMode, HdrFormat, HdrPixelFormat, LineEnding, RleMode,
 };
 
 fn fixture_path(name: &str) -> PathBuf {
@@ -189,5 +189,88 @@ fn gradient_32x16_crlf_plusy_decode_and_reencode() {
     assert_eq!(
         reencoded, bytes,
         "re-encoded bytes drifted from gradient_32x16_crlf_plusY.hdr",
+    );
+}
+
+#[test]
+fn flat_4x2_uncompressed_decode_and_reencode() {
+    // -----------------------------------------------------------------
+    // Fixture 4: `flat_4x2_uncompressed.hdr`
+    //
+    // Round 196: exercise the spec's third scanline flavour
+    // ("Uncompressed — each scanline is M pixels × 4 bytes"). Width 4
+    // is below the new-RLE marker's `8..=32767` addressable range, so
+    // the on-disk scanline is a flat `4 * width` byte array of RGBE
+    // quads. The matching `RleMode::Uncompressed` encoder produces no
+    // marker and no sentinels.
+    //
+    // The fixture is read via `parse_hdr_with_options(..., Uncompressed)`
+    // — the historical `parse_hdr` would fall back to old-RLE and could
+    // misinterpret a literal `(1, 1, 1, *)` quad as a run sentinel,
+    // per the round 196 read-side spec gap.
+    // -----------------------------------------------------------------
+    let bytes = read_fixture("flat_4x2_uncompressed.hdr");
+    let img = parse_hdr_with_options(&bytes, FallbackMode::Uncompressed)
+        .expect("parse flat 4x2 uncompressed fixture");
+
+    assert_eq!(img.width, 4);
+    assert_eq!(img.height, 2);
+    assert_eq!(img.pixel_format, HdrPixelFormat::Rgb96f);
+    assert_eq!(img.pixels.len(), 4 * 2 * 3);
+
+    // Default axis flags (Y-first, decreasing Y, increasing X).
+    assert!(!img.header.x_first);
+    assert_eq!(img.header.y_sign, AxisSign::Decreasing);
+    assert_eq!(img.header.x_sign, AxisSign::Increasing);
+    assert!(matches!(img.header.format, HdrFormat::Rgbe));
+
+    // Sanity-check a couple of pixels.  The gen_fixtures construction
+    // sets pixel (3,1) to (R, G, B) = (2.0, 1.5, 1.0); after the
+    // shared-exponent round-trip the recovered values are within the
+    // documented ~1% precision.
+    // Pixel (x=3, y=1) lives at row-major offset `(y * W + x) * 3`.
+    let off_31 = (4 + 3) * 3;
+    let r31 = img.pixels[off_31];
+    let g31 = img.pixels[off_31 + 1];
+    let b31 = img.pixels[off_31 + 2];
+    assert!(
+        (r31 - 2.0).abs() < 0.05,
+        "pixel (3,1) R drifted: {r31} (want ~2.0)"
+    );
+    assert!(
+        (g31 - 1.5).abs() < 0.05,
+        "pixel (3,1) G drifted: {g31} (want ~1.5)"
+    );
+    assert!(
+        (b31 - 1.0).abs() < 0.05,
+        "pixel (3,1) B drifted: {b31} (want ~1.0)"
+    );
+
+    // Pixel section is exactly 4*2*4 = 32 bytes — the on-disk size
+    // confirms the encoder did NOT emit a new-RLE marker (4 bytes) or
+    // old-RLE sentinels.
+    let blank = bytes
+        .windows(2)
+        .position(|w| w == b"\n\n")
+        .expect("blank-line terminator missing");
+    let resline_end = blank
+        + 2
+        + bytes[blank + 2..]
+            .iter()
+            .position(|&b| b == b'\n')
+            .expect("resolution-line terminator missing");
+    let pixel_section_len = bytes.len() - (resline_end + 1);
+    assert_eq!(
+        pixel_section_len,
+        4 * 2 * 4,
+        "uncompressed pixel section should be exactly 4*W*H bytes — got {pixel_section_len}",
+    );
+
+    // Re-emit with the same options and verify byte-identity.
+    let reencoded =
+        encode_hdr_with_rle(&img, RleMode::Uncompressed).expect("re-encode flat uncompressed");
+    assert_eq!(
+        reencoded, bytes,
+        "re-encoded bytes drifted from flat_4x2_uncompressed.hdr",
     );
 }

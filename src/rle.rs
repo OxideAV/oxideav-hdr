@@ -1,7 +1,11 @@
 //! Adaptive RLE for Radiance scanlines.
 //!
-//! Two flavours exist; this module knows about both on the read path
-//! and emits only the new format on the write path.
+//! Three on-disk flavours exist per the staged spec at
+//! `docs/image/hdr/radiance-hdr-rgbe-format.md` ("Scanline flavors (RLE)"):
+//! new-RLE, old-RLE, and **uncompressed** (a direct `4 * width` byte
+//! array of RGBE quads with no sentinels). This module recognises all
+//! three on the read path and emits the caller-chosen flavour on the
+//! write path.
 //!
 //! ## New RLE (post-1991, what every modern writer emits)
 //!
@@ -22,7 +26,7 @@
 //!   following single byte is repeated `n - 128` times (so 1..=127
 //!   repeats).
 //!
-//! ## Old RLE (pre-1991, read-only here)
+//! ## Old RLE (pre-1991)
 //!
 //! Each scanline is a sequence of 4-byte pixels. A pixel whose
 //! mantissa is `(1, 1, 1)` is a *sentinel*: its exponent byte is the
@@ -30,21 +34,77 @@
 //! bytes shifted by 8 each. The run repeats the previous decoded pixel.
 //! The first scanline cannot be a sentinel run (there's no previous
 //! pixel), and a sentinel chain of 16 or more bytes is malformed.
+//!
+//! ## Uncompressed (flat)
+//!
+//! Each scanline is exactly `4 * width` bytes — `width` consecutive
+//! RGBE quads in source order with no sentinels and no marker. Per the
+//! staged spec, a reader that fails the new-RLE marker check should
+//! "fall back to reading the scanline flat"; this is the most permissive
+//! fallback because it makes no assumption about pixel-value patterns
+//! (an old-RLE fallback misinterprets a literal `(1, 1, 1, *)` pixel as
+//! a run marker). Uncompressed is also the right fallback for writers
+//! that never used either RLE scheme — `cargo run --example
+//! gen_fixtures` and the `tests/fixtures/gradient_8x4_flat.hdr` fixture
+//! cover this case end-to-end.
 
 use crate::error::{HdrError as Error, Result};
 
-/// Decode one scanline. `width` is the number of pixels expected.
-/// Returns four channel buffers (R, G, B, E) of `width` bytes each.
-/// `pos` is advanced past the bytes consumed.
+/// Choice of fallback when the new-RLE marker is absent.
 ///
-/// Picks new-RLE vs old-RLE based on the first four bytes: if they
-/// match `0x02 0x02 hi lo` with `hi << 8 | lo == width` and `width >= 8`
-/// the new format is used; otherwise we fall through to the old one.
+/// Per the staged spec, a non-RLE scanline is "read flat", i.e. as a
+/// contiguous `4 * width` byte array of RGBE quads ([`FallbackMode::Uncompressed`]).
+/// Old-RLE files (pre-1991 Radiance pictures) instead carry sentinel
+/// pixels for run-length encoding; pick [`FallbackMode::OldRle`] to
+/// honour those sentinels.
+///
+/// The decoder's default ([`decode_scanline`]) is [`FallbackMode::OldRle`]
+/// to preserve compatibility with every fixture and downstream consumer
+/// that landed before round 196.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FallbackMode {
+    /// Treat each 4-byte quad after a missed new-RLE marker as a literal
+    /// RGBE pixel. The most permissive choice — never misinterprets a
+    /// legitimate `(1, 1, 1, *)` pixel as a run sentinel. Matches the
+    /// spec's "read the scanline flat" fallback.
+    Uncompressed,
+    /// Interpret `(1, 1, 1, n)` quads as repeat-sentinels for the
+    /// previous pixel (the historical pre-1991 grammar). This is what
+    /// the round-1..195 decoder did unconditionally.
+    OldRle,
+}
+
+/// Decode one scanline using the historical [`FallbackMode::OldRle`]
+/// fallback. This is the round-1..195 behaviour preserved for
+/// backwards-compatibility; new callers that need spec-faithful
+/// flat-fallback handling should use [`decode_scanline_with_fallback`]
+/// with [`FallbackMode::Uncompressed`].
+///
+/// `width` is the number of pixels expected. Returns four channel
+/// buffers (R, G, B, E) of `width` bytes each. `pos` is advanced past
+/// the bytes consumed. Picks new-RLE vs old-RLE based on the first four
+/// bytes: if they match `0x02 0x02 hi lo` with `hi << 8 | lo == width`
+/// and `width >= 8` the new format is used; otherwise we fall through
+/// to the old one.
 pub fn decode_scanline(
     src: &[u8],
     pos: &mut usize,
     width: usize,
     prev_pixel: &mut Option<[u8; 4]>,
+) -> Result<[Vec<u8>; 4]> {
+    decode_scanline_with_fallback(src, pos, width, prev_pixel, FallbackMode::OldRle)
+}
+
+/// Decode one scanline picking the non-new-RLE branch per `fallback`.
+///
+/// The marker probe is identical to [`decode_scanline`]; only what
+/// happens when the probe fails differs.
+pub fn decode_scanline_with_fallback(
+    src: &[u8],
+    pos: &mut usize,
+    width: usize,
+    prev_pixel: &mut Option<[u8; 4]>,
+    fallback: FallbackMode,
 ) -> Result<[Vec<u8>; 4]> {
     if width == 0 {
         return Err(Error::invalid("HDR: zero-width scanline"));
@@ -60,8 +120,86 @@ pub fn decode_scanline(
         *pos = p + 4;
         decode_new_rle(src, pos, width, prev_pixel)
     } else {
-        decode_old_rle(src, pos, width, prev_pixel)
+        match fallback {
+            FallbackMode::OldRle => decode_old_rle(src, pos, width, prev_pixel),
+            FallbackMode::Uncompressed => decode_uncompressed(src, pos, width, prev_pixel),
+        }
     }
+}
+
+/// Decode one scanline as a flat `4 * width` byte RGBE array — the
+/// uncompressed flavour. No sentinel handling; every 4-byte quad is a
+/// literal pixel.
+fn decode_uncompressed(
+    src: &[u8],
+    pos: &mut usize,
+    width: usize,
+    prev_pixel: &mut Option<[u8; 4]>,
+) -> Result<[Vec<u8>; 4]> {
+    let need = width.checked_mul(4).ok_or_else(|| {
+        Error::invalid("HDR: uncompressed scanline width × 4 bytes overflows usize")
+    })?;
+    if src.len() < *pos + need {
+        return Err(Error::invalid("HDR: uncompressed scanline truncated"));
+    }
+    let mut out: [Vec<u8>; 4] = [
+        Vec::with_capacity(width),
+        Vec::with_capacity(width),
+        Vec::with_capacity(width),
+        Vec::with_capacity(width),
+    ];
+    let bytes = &src[*pos..*pos + need];
+    for quad in bytes.chunks_exact(4) {
+        out[0].push(quad[0]);
+        out[1].push(quad[1]);
+        out[2].push(quad[2]);
+        out[3].push(quad[3]);
+    }
+    *pos += need;
+    *prev_pixel = Some([
+        out[0][width - 1],
+        out[1][width - 1],
+        out[2][width - 1],
+        out[3][width - 1],
+    ]);
+    Ok(out)
+}
+
+/// Encode one scanline as a flat `4 * width` byte RGBE array — the
+/// uncompressed flavour. Each pixel is written as a literal RGBE quad
+/// in source order; no sentinels, no marker. Useful for narrow images
+/// where the new-RLE marker can't fire (width < 8 or > 32767) and where
+/// the caller wants the decoder fallback to interpret literal
+/// `(1, 1, 1, *)` pixels correctly — the old-RLE writer's
+/// 0.4 %-perturbation-of-red workaround would otherwise apply.
+pub fn encode_scanline_uncompressed(
+    channels: &[Vec<u8>; 4],
+    width: usize,
+    out: &mut Vec<u8>,
+) -> Result<()> {
+    if width == 0 {
+        return Err(Error::invalid(
+            "HDR encoder: zero-width uncompressed scanline",
+        ));
+    }
+    if channels[0].len() != width
+        || channels[1].len() != width
+        || channels[2].len() != width
+        || channels[3].len() != width
+    {
+        return Err(Error::invalid(
+            "HDR encoder: uncompressed channel length mismatch",
+        ));
+    }
+    out.reserve(width * 4);
+    let [r, g, b, e] = channels;
+    for (((rv, gv), bv), ev) in r.iter().zip(g.iter()).zip(b.iter()).zip(e.iter()) {
+        out.push(*rv);
+        out.push(*gv);
+        out.push(*bv);
+        out.push(*ev);
+    }
+    Ok(())
 }
 
 fn decode_new_rle(
@@ -211,8 +349,16 @@ fn decode_old_rle(
 /// A literal pixel whose mantissa happens to be `(1, 1, 1)` would be
 /// indistinguishable from a sentinel on the read side, so we promote
 /// it to `(2, 1, 1)` (least-significant-bit nudge on the red channel)
-/// before writing. This matches what Greg Ward's reference writer did
-/// to sidestep the same ambiguity.
+/// before writing. The staged spec at
+/// `docs/image/hdr/radiance-hdr-rgbe-format.md` describes
+/// `(1, 1, 1, *)` as an "illegal (unnormalised) pixel" reserved for
+/// the run-sentinel role, so the spec is read as forbidding it as a
+/// literal in old-RLE output; the +1 bump on red is below the
+/// shared-exponent quantisation step. Callers that need to preserve
+/// such literals losslessly should use
+/// [`crate::encoder::RleMode::Uncompressed`] (and the matching
+/// [`FallbackMode::Uncompressed`] on read), which has no reserved-pixel
+/// grammar.
 pub fn encode_scanline_old_rle(
     channels: &[Vec<u8>; 4],
     width: usize,
@@ -554,6 +700,125 @@ mod tests {
         // First 4 bytes should be the literal pixel itself.
         assert_eq!(&encoded[..4], &[0x55, 0x66, 0x77, 0x80]);
         let back = decode_old_rle_only(&encoded, 4);
+        assert_eq!(back, chans);
+    }
+
+    #[test]
+    fn uncompressed_encode_writes_4_times_width_bytes() {
+        let chans = [
+            vec![0x10, 0x40, 0x70],
+            vec![0x20, 0x50, 0x80],
+            vec![0x30, 0x60, 0x90],
+            vec![0x80, 0x81, 0x82],
+        ];
+        let mut encoded = Vec::new();
+        encode_scanline_uncompressed(&chans, 3, &mut encoded).unwrap();
+        assert_eq!(encoded.len(), 12);
+        // Bytes are interleaved per pixel as (R, G, B, E) — the
+        // exponent of the last pixel (0x82) sits at byte index 11.
+        assert_eq!(encoded[0], 0x10); // R[0]
+        assert_eq!(encoded[3], 0x80); // E[0]
+        assert_eq!(encoded[11], 0x82); // E[2]
+    }
+
+    #[test]
+    fn uncompressed_roundtrip_via_fallback_mode() {
+        // Encode flat, decode with FallbackMode::Uncompressed — every
+        // byte should survive (no perturbation).
+        let chans = [
+            vec![0x01, 0x40, 0x70], // R[0]==1 — would collide with sentinel
+            vec![0x01, 0x50, 0x80], // G[0]==1
+            vec![0x01, 0x60, 0x90], // B[0]==1 — full (1,1,1) literal
+            vec![0x80, 0x80, 0x80],
+        ];
+        let mut encoded = Vec::new();
+        encode_scanline_uncompressed(&chans, 3, &mut encoded).unwrap();
+        let mut pos = 0;
+        let mut prev = None;
+        let back = decode_scanline_with_fallback(
+            &encoded,
+            &mut pos,
+            3,
+            &mut prev,
+            FallbackMode::Uncompressed,
+        )
+        .unwrap();
+        // Critical: the (1,1,1,0x80) literal first pixel survives
+        // intact under the uncompressed fallback — the old-RLE fallback
+        // would have misread it as a sentinel.
+        assert_eq!(back, chans);
+        assert_eq!(pos, encoded.len());
+    }
+
+    #[test]
+    fn old_rle_fallback_misreads_111_literal_uncompressed_fallback_recovers() {
+        // Demonstrate the spec gap the new fallback closes. The on-disk
+        // bytes are a literal `(1, 1, 1, 0x05)` pixel followed by two
+        // more 4-byte literals — written flat, no sentinels intended.
+        // Under FallbackMode::OldRle the first quad is misread as a
+        // sentinel for a 5-pixel run (there's no previous literal, so
+        // it would actually produce a run of the all-zero pixel); under
+        // FallbackMode::Uncompressed we get all three literals back.
+        let bytes = [
+            0x01, 0x01, 0x01, 0x05, // would-be sentinel under OldRle
+            0x40, 0x50, 0x60, 0x80, // pixel B
+            0x70, 0x80, 0x90, 0x80, // pixel C
+        ];
+        let mut pos = 0;
+        let mut prev = None;
+        let chans = decode_scanline_with_fallback(
+            &bytes,
+            &mut pos,
+            3,
+            &mut prev,
+            FallbackMode::Uncompressed,
+        )
+        .unwrap();
+        assert_eq!(chans[0], vec![0x01, 0x40, 0x70]);
+        assert_eq!(chans[1], vec![0x01, 0x50, 0x80]);
+        assert_eq!(chans[2], vec![0x01, 0x60, 0x90]);
+        assert_eq!(chans[3], vec![0x05, 0x80, 0x80]);
+    }
+
+    #[test]
+    fn uncompressed_truncated_input_errors() {
+        // Width 4 ⇒ need 16 bytes; we feed only 10.
+        let bytes = [0u8; 10];
+        let mut pos = 0;
+        let mut prev = None;
+        assert!(decode_scanline_with_fallback(
+            &bytes,
+            &mut pos,
+            4,
+            &mut prev,
+            FallbackMode::Uncompressed,
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn new_rle_marker_still_recognised_under_uncompressed_fallback() {
+        // The fallback only fires when the new-RLE marker check fails.
+        // With a valid marker on a width-16 scanline, FallbackMode::Uncompressed
+        // must NOT engage — the new-RLE path runs as normal.
+        let chans = [
+            vec![0xAAu8; 16],
+            vec![0xBBu8; 16],
+            vec![0xCCu8; 16],
+            vec![0xDDu8; 16],
+        ];
+        let mut encoded = Vec::new();
+        encode_scanline(&chans, 16, &mut encoded).unwrap();
+        let mut pos = 0;
+        let mut prev = None;
+        let back = decode_scanline_with_fallback(
+            &encoded,
+            &mut pos,
+            16,
+            &mut prev,
+            FallbackMode::Uncompressed,
+        )
+        .unwrap();
         assert_eq!(back, chans);
     }
 }

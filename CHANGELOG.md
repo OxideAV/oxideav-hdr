@@ -7,6 +7,42 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Round 196: closed the read/write spec gap for the third on-disk
+  scanline flavour the staged Radiance spec enumerates ("Uncompressed
+  — each scanline is M pixels × 4 bytes"). The encoder gains
+  `RleMode::Uncompressed`, which emits a flat `4 * width` byte RGBE
+  quad array per scanline with no `0x02 0x02 hi lo` marker and no
+  `(1, 1, 1, *)` sentinels. The decoder gains
+  `FallbackMode::Uncompressed` and a matching `parse_hdr_with_options`
+  entry point: when the new-RLE marker probe fails, the fallback is
+  configurable between the historical `OldRle` (sentinel-aware,
+  default of `parse_hdr` for backwards compatibility) and the new
+  `Uncompressed` (every quad is a literal RGBE pixel — the spec's
+  documented "read the scanline flat" fallback). The Uncompressed
+  fallback is the right choice for any file whose pixel section
+  contains a legitimate `(1, 1, 1, *)` quad — the OldRle fallback
+  would misinterpret it as a run sentinel. A fourth committed on-disk
+  fixture (`tests/fixtures/flat_4x2_uncompressed.hdr`, 77 bytes)
+  pins the encoder + decoder round-trip and asserts the pixel section
+  is exactly `4 * W * H` bytes (no marker, no sentinels). Six new
+  unit tests and one end-to-end public-API round-trip cover the new
+  surface; the existing `parse_hdr` / `encode_hdr` API is unchanged
+  and the round-1..195 default behaviour is preserved bit-for-bit.
+
+### Changed
+
+- Round 196 Hat-3 audit pass on `src/rle.rs` + `src/encoder.rs`:
+  rephrased two doc-comment references to "Greg Ward's reference
+  writer" / "Greg Ward's adaptive new-RLE" to attribute the
+  documented behaviour to the staged spec at
+  `docs/image/hdr/radiance-hdr-rgbe-format.md` instead of the
+  reference C implementation. All other Greg Ward citations refer to
+  the format-spec author or the published format documents and are
+  preserved unchanged. No code derivation, no source consultation —
+  the rephrasing is documentation hygiene, not a correctness fix.
+
 ## [0.0.3](https://github.com/OxideAV/oxideav-hdr/compare/v0.0.2...v0.0.3) - 2026-05-30
 
 ### Other

@@ -26,7 +26,7 @@ use crate::error::{HdrError as Error, Result};
 use crate::header::{AxisSign, HdrHeader};
 use crate::image::{HdrImage, HdrPixelFormat};
 use crate::rgbe::rgb_to_rgbe;
-use crate::rle::{encode_scanline, encode_scanline_old_rle};
+use crate::rle::{encode_scanline, encode_scanline_old_rle, encode_scanline_uncompressed};
 
 /// Choice of line terminator used by the encoder's text section
 /// (magic line, `KEY=VALUE` records, blank-line separator, resolution
@@ -58,8 +58,10 @@ impl LineEnding {
 /// Choice of RLE flavour for the encoded scanlines.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RleMode {
-    /// Greg Ward's adaptive new-RLE (`0x02 0x02 hi lo` marker per
-    /// scanline). Width must be in `8..=32767`.
+    /// The adaptive new-RLE flavour (`0x02 0x02 hi lo` marker per
+    /// scanline) described in §"Scanline flavors (RLE)" of
+    /// `docs/image/hdr/radiance-hdr-rgbe-format.md`. Width must be in
+    /// `8..=32767`.
     New,
     /// Pre-1991 old-RLE: per-pixel literals interleaved with chained
     /// `(1, 1, 1, n)` sentinel runs. No width restriction.
@@ -69,6 +71,16 @@ pub enum RleMode {
     /// fall back to [`RleMode::Old`]. The encoder never errors on
     /// out-of-range widths in `Auto` mode.
     Auto,
+    /// Flat / uncompressed scanlines — `4 * width` bytes per row, each
+    /// quad a literal RGBE pixel. No marker, no sentinels. The third
+    /// flavour listed by the staged spec ("Uncompressed — each scanline
+    /// is M pixels × 4 bytes"). The right choice when the caller wants
+    /// to preserve literal `(1, 1, 1, *)` pixels exactly (the old-RLE
+    /// writer perturbs those to dodge the run-sentinel ambiguity), or
+    /// when targeting a consumer that doesn't grok either RLE flavour.
+    /// Pair with [`crate::rle::FallbackMode::Uncompressed`] on the read
+    /// side via [`parse_hdr_with_options`].
+    Uncompressed,
 }
 
 #[cfg(feature = "registry")]
@@ -468,6 +480,7 @@ fn write_pixel_rows(
         match rle {
             RleMode::New => encode_scanline(&channels, width, out)?,
             RleMode::Old | RleMode::Auto => encode_scanline_old_rle(&channels, width, out)?,
+            RleMode::Uncompressed => encode_scanline_uncompressed(&channels, width, out)?,
         }
     }
     Ok(())

@@ -14,7 +14,7 @@ use crate::error::{HdrError as Error, Result};
 use crate::header::{AxisSign, HdrFormat, HdrHeader, Primaries};
 use crate::image::{HdrImage, HdrPixelFormat};
 use crate::rgbe::rgbe_to_rgb;
-use crate::rle::decode_scanline;
+use crate::rle::{decode_scanline_with_fallback, FallbackMode};
 
 #[cfg(feature = "registry")]
 use oxideav_core::Decoder;
@@ -100,6 +100,20 @@ fn image_to_video_frame(image: HdrImage) -> VideoFrame {
 /// resolution line + pixel rows) into an [`HdrImage`] tagged
 /// [`HdrPixelFormat::Rgb96f`], top-down.
 pub fn parse_hdr(input: &[u8]) -> Result<HdrImage> {
+    parse_hdr_with_options(input, FallbackMode::OldRle)
+}
+
+/// Decode a complete HDR file picking the non-new-RLE fallback per
+/// `fallback`. See [`FallbackMode`] for the trade-off.
+///
+/// Use [`FallbackMode::Uncompressed`] for files written with
+/// [`crate::encoder::RleMode::Uncompressed`] or any other flat-scanline
+/// writer; use [`FallbackMode::OldRle`] (the default of [`parse_hdr`])
+/// for pre-1991 sentinel-run files. The two modes diverge only when
+/// the new-RLE marker is absent: with `OldRle`, `(1, 1, 1, *)` quads
+/// are interpreted as run sentinels; with `Uncompressed`, every quad
+/// is a literal RGBE pixel.
+pub fn parse_hdr_with_options(input: &[u8], fallback: FallbackMode) -> Result<HdrImage> {
     let mut cursor = 0usize;
     let mut header = parse_header(input, &mut cursor)?;
     let (width, height) = parse_resolution(input, &mut cursor, &mut header)?;
@@ -112,7 +126,7 @@ pub fn parse_hdr(input: &[u8]) -> Result<HdrImage> {
     } else {
         (height, width)
     };
-    let pixels = decode_pixel_rows(input, &mut cursor, scanline_len, scanline_count)?;
+    let pixels = decode_pixel_rows(input, &mut cursor, scanline_len, scanline_count, fallback)?;
     let pixels = reorder_for_axis_flags(pixels, width, height, &header);
     Ok(HdrImage {
         width: width as u32,
@@ -321,11 +335,12 @@ fn decode_pixel_rows(
     cursor: &mut usize,
     width: usize,
     height: usize,
+    fallback: FallbackMode,
 ) -> Result<Vec<f32>> {
     let mut pixels = vec![0.0f32; width * height * 3];
     let mut prev_pixel: Option<[u8; 4]> = None;
     for y in 0..height {
-        let chans = decode_scanline(input, cursor, width, &mut prev_pixel)?;
+        let chans = decode_scanline_with_fallback(input, cursor, width, &mut prev_pixel, fallback)?;
         for (x, ch_r) in chans[0].iter().enumerate() {
             let rgbe = [*ch_r, chans[1][x], chans[2][x], chans[3][x]];
             let rgb = rgbe_to_rgb(rgbe);
