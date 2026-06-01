@@ -29,6 +29,14 @@ pub enum HdrError {
     /// The byte stream uses a feature this codec doesn't implement
     /// (unknown FORMAT, encoder asked to write old-RLE, etc.).
     Unsupported(String),
+    /// The resolution line declares a picture larger than the caller-
+    /// configured [`crate::HdrLimits`]. Raised before any pixel buffer
+    /// is allocated. Round 202 added this variant so attacker-crafted
+    /// gigantic-dimension headers (e.g. `-Y u32::MAX +X u32::MAX`) are
+    /// rejected at the door rather than triggering an unbounded
+    /// allocation. The string carries the dimension that tripped the
+    /// limit and the limit value for diagnosability.
+    TooLarge(String),
 }
 
 impl HdrError {
@@ -41,6 +49,11 @@ impl HdrError {
     pub fn unsupported(msg: impl Into<String>) -> Self {
         Self::Unsupported(msg.into())
     }
+
+    /// Construct an [`HdrError::TooLarge`] from a stringy message.
+    pub fn too_large(msg: impl Into<String>) -> Self {
+        Self::TooLarge(msg.into())
+    }
 }
 
 impl fmt::Display for HdrError {
@@ -48,6 +61,7 @@ impl fmt::Display for HdrError {
         match self {
             Self::InvalidData(s) => write!(f, "invalid data: {s}"),
             Self::Unsupported(s) => write!(f, "unsupported: {s}"),
+            Self::TooLarge(s) => write!(f, "too large: {s}"),
         }
     }
 }

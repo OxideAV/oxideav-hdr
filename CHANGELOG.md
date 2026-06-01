@@ -9,6 +9,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Round 202 (depth mode — hardening + fuzz harness): new
+  `HdrLimits` decoder resource-limit type plus the matching
+  `parse_hdr_with_limits` / `parse_hdr_with_options_and_limits` public
+  entry points, and a `cargo-fuzz` harness under `fuzz/` with three
+  libFuzzer targets (`decode`, `roundtrip`, `headers`). The default
+  `HdrLimits` (max 32 767 × 32 767, ≤ 256 MiB pixel buffer) match the
+  new-RLE marker's addressability ceiling and gate the
+  `width × height × 12 byte` allocation in `decode_pixel_rows` so an
+  attacker-crafted resolution line like `-Y 2_000_000_000 +X 2_000_000_000`
+  is rejected at parse time with the new
+  `HdrError::TooLarge` variant — round 1..201 the same input would have
+  attempted an unbounded allocation (and either OOM'd the host or
+  wrapped the `usize` multiplication on 64-bit hosts). `parse_hdr` keeps
+  its existing signature and threads through the default limits, so the
+  round 1..201 happy path stays bit-identical; existing callers see no
+  observable change. Six new unit tests pin the limit-enforcement
+  contract (per-axis caps, pixel-byte cap, custom relax via
+  `parse_hdr_with_options_and_limits`, `HdrLimits::unbounded` opt-out)
+  and the fuzz crate is wired with `default-features = false` so it
+  builds against the framework-free standalone surface. Closes the
+  hostile-input attack surface the existing test corpus didn't exercise.
+
 - Round 196: closed the read/write spec gap for the third on-disk
   scanline flavour the staged Radiance spec enumerates ("Uncompressed
   — each scanline is M pixels × 4 bytes"). The encoder gains

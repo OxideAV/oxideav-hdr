@@ -24,6 +24,14 @@ impl From<HdrError> for oxideav_core::Error {
         match e {
             HdrError::InvalidData(s) => oxideav_core::Error::InvalidData(s),
             HdrError::Unsupported(s) => oxideav_core::Error::Unsupported(s),
+            // The framework `Error` enum has no dedicated TooLarge
+            // variant — fold it back into `InvalidData` so framework
+            // callers see a single `Decoder` error class without losing
+            // the diagnostic string. Standalone callers that care about
+            // the distinction (e.g. distinguishing "this picture is too
+            // big for our policy" from "this header is malformed") match
+            // on the crate-local `HdrError::TooLarge` directly.
+            HdrError::TooLarge(s) => oxideav_core::Error::InvalidData(s),
         }
     }
 }

@@ -36,6 +36,7 @@ pub mod encoder;
 pub mod error;
 pub mod header;
 pub mod image;
+pub mod limits;
 #[cfg(feature = "registry")]
 pub mod registry;
 pub mod rgbe;
@@ -48,7 +49,9 @@ pub const CODEC_ID_STR: &str = "hdr";
 
 #[cfg(feature = "registry")]
 pub use decoder::parse_hdr_videoframe;
-pub use decoder::{parse_hdr, parse_hdr_with_options};
+pub use decoder::{
+    parse_hdr, parse_hdr_with_limits, parse_hdr_with_options, parse_hdr_with_options_and_limits,
+};
 pub use encoder::{
     encode_hdr, encode_hdr_rgb96f, encode_hdr_with_options, encode_hdr_with_rle, LineEnding,
     RleMode,
@@ -56,6 +59,7 @@ pub use encoder::{
 pub use error::{HdrError, Result};
 pub use header::{AxisSign, HdrFormat, HdrHeader, Primaries};
 pub use image::{HdrImage, HdrPixelFormat};
+pub use limits::HdrLimits;
 pub use rgbe::{rgb_to_rgbe, rgbe_to_rgb};
 pub use rle::FallbackMode;
 pub use tonemap::{tone_map, ToneMap};

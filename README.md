@@ -17,7 +17,7 @@ Clean-room implementation against the published format documentation
 Radiance source / `image` crate's `hdr` submodule / Greg Ward's
 reference C code consulted.
 
-## Coverage (round 196)
+## Coverage (round 202)
 
 | Feature                      | Read | Write |
 |------------------------------|:----:|:-----:|
@@ -36,6 +36,7 @@ reference C code consulted.
 | Auto-RLE (width heuristic)   |  -   |   Y (`RleMode::Auto`) |
 | Uncompressed (flat `4 * W` byte) scanlines | Y (`parse_hdr_with_options(_, FallbackMode::Uncompressed)`) | Y (`RleMode::Uncompressed`) |
 | CRLF line endings            |  Y   |   Y (`LineEnding::Crlf`) |
+| Decoder resource limits (`HdrLimits`) | Y (default 32 767 × 32 767, ≤ 256 MiB pixel buffer, `parse_hdr_with_limits` / `parse_hdr_with_options_and_limits` for custom) | n/a |
 | `HdrImage::apply_exposure`   |  decode helper |  n/a |
 | `HdrImage::apply_colorcorr`  |  decode helper |  n/a |
 | XYZE ↔ RGB (sRGB / Radiance) |  -   | helpers |
@@ -160,6 +161,32 @@ Observations:
   squarely on the alloc-elimination axis (the rgb_to_rgbe loop +
   the four per-channel staging-buffer fills still dominate the
   remaining wall time).
+
+## Fuzzing
+
+Round 202 added a `cargo-fuzz` harness under [`fuzz/`](fuzz/) with three
+libFuzzer targets covering the public decode + encode surface end-to-end.
+The harness uses the standalone (`default-features = false`) build so it
+never links `oxideav-core` — the targets exercise only the
+framework-free `parse_hdr` / `encode_hdr` path that downstream
+image-library consumers actually call.
+
+| Target       | What it stresses                                                                                 |
+|--------------|--------------------------------------------------------------------------------------------------|
+| `decode`     | `parse_hdr(arbitrary bytes)` — every code path the decoder can take on hostile input. The new round-202 `HdrLimits` default (max 32 767 × 32 767, ≤ 256 MiB pixel buffer) caps the worst-case allocation so libFuzzer doesn't OOM. |
+| `roundtrip`  | Synthesise a fuzz-driven small picture, run `encode_hdr` → `parse_hdr`, assert structure survives end-to-end. Catches encoder/decoder asymmetries. |
+| `headers`    | Prepend a valid `#?RADIANCE\n` magic and a minimal `-Y 1 +X 8\n` resolution line so libFuzzer's coverage gradient focuses the corpus on the text `KEY=VALUE` parse (EXPOSURE / COLORCORR / PRIMARIES floats, comment lines, mid-line `=`). |
+
+Run any target with:
+
+```sh
+cd fuzz
+cargo +nightly fuzz run decode      # or roundtrip / headers
+```
+
+The harness is `cargo-fuzz` standard layout — `fuzz/Cargo.toml` declares
+its own `[workspace]` block so the umbrella workspace never tries to
+build the `nightly`-only libfuzzer dependency.
 
 ## License
 

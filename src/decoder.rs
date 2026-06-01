@@ -13,6 +13,7 @@
 use crate::error::{HdrError as Error, Result};
 use crate::header::{AxisSign, HdrFormat, HdrHeader, Primaries};
 use crate::image::{HdrImage, HdrPixelFormat};
+use crate::limits::HdrLimits;
 use crate::rgbe::rgbe_to_rgb;
 use crate::rle::{decode_scanline_with_fallback, FallbackMode};
 
@@ -98,13 +99,27 @@ fn image_to_video_frame(image: HdrImage) -> VideoFrame {
 
 /// Decode a complete HDR file (magic line + `KEY=VALUE` header +
 /// resolution line + pixel rows) into an [`HdrImage`] tagged
-/// [`HdrPixelFormat::Rgb96f`], top-down.
+/// [`HdrPixelFormat::Rgb96f`], top-down. Applies the default
+/// [`HdrLimits`] (max 32 767 × 32 767, ≤ 256 MiB pixel buffer); for
+/// trusted input that needs larger pictures use
+/// [`parse_hdr_with_limits`] / [`parse_hdr_with_options_and_limits`].
 pub fn parse_hdr(input: &[u8]) -> Result<HdrImage> {
-    parse_hdr_with_options(input, FallbackMode::OldRle)
+    parse_hdr_with_options_and_limits(input, FallbackMode::OldRle, &HdrLimits::default())
+}
+
+/// Like [`parse_hdr`] but with a caller-chosen [`HdrLimits`].
+///
+/// Pass [`HdrLimits::unbounded`] for trusted local input that needs to
+/// decode legitimately-huge pictures (the encoder's `Vec` capacity
+/// still bounds the worst case via the allocator); see [`HdrLimits`]
+/// for the field-by-field rationale of the defaults.
+pub fn parse_hdr_with_limits(input: &[u8], limits: &HdrLimits) -> Result<HdrImage> {
+    parse_hdr_with_options_and_limits(input, FallbackMode::OldRle, limits)
 }
 
 /// Decode a complete HDR file picking the non-new-RLE fallback per
-/// `fallback`. See [`FallbackMode`] for the trade-off.
+/// `fallback`. See [`FallbackMode`] for the trade-off. Applies the
+/// default [`HdrLimits`].
 ///
 /// Use [`FallbackMode::Uncompressed`] for files written with
 /// [`crate::encoder::RleMode::Uncompressed`] or any other flat-scanline
@@ -114,9 +129,25 @@ pub fn parse_hdr(input: &[u8]) -> Result<HdrImage> {
 /// are interpreted as run sentinels; with `Uncompressed`, every quad
 /// is a literal RGBE pixel.
 pub fn parse_hdr_with_options(input: &[u8], fallback: FallbackMode) -> Result<HdrImage> {
+    parse_hdr_with_options_and_limits(input, fallback, &HdrLimits::default())
+}
+
+/// Full-control decode: pick the non-new-RLE fallback per `fallback`
+/// AND the resource ceilings per `limits` independently.
+///
+/// The limits apply at the resolution-line stage — before the decoder
+/// allocates the `width * height * 3` float pixel buffer — so a
+/// malicious header is rejected at the door with
+/// [`HdrError::TooLarge`](crate::HdrError::TooLarge) rather than
+/// triggering an unbounded allocation.
+pub fn parse_hdr_with_options_and_limits(
+    input: &[u8],
+    fallback: FallbackMode,
+    limits: &HdrLimits,
+) -> Result<HdrImage> {
     let mut cursor = 0usize;
     let mut header = parse_header(input, &mut cursor)?;
-    let (width, height) = parse_resolution(input, &mut cursor, &mut header)?;
+    let (width, height) = parse_resolution(input, &mut cursor, &mut header, limits)?;
     // Resolution line lists the *outer* axis first, then the inner axis.
     // For Y-first files (`±Y H ±X W`) that's H scanlines of W pixels.
     // For X-first files (`±X W ±Y H`) it's W scanlines of H pixels —
@@ -263,6 +294,7 @@ fn parse_resolution(
     input: &[u8],
     cursor: &mut usize,
     header: &mut HdrHeader,
+    limits: &HdrLimits,
 ) -> Result<(usize, usize)> {
     let line =
         read_line(input, cursor).ok_or_else(|| Error::invalid("HDR: missing resolution line"))?;
@@ -306,6 +338,41 @@ fn parse_resolution(
     if width == 0 || height == 0 {
         return Err(Error::invalid("HDR: zero dimension in resolution line"));
     }
+    // Apply the caller-configured resource limits BEFORE returning the
+    // dimensions. The downstream pixel-buffer allocation is
+    // `width * height * 3 * sizeof(f32)`; without these checks a
+    // malicious header could either OOM the host or trigger a usize
+    // overflow that wraps the allocation request to a tiny value and
+    // sets up out-of-bounds writes later in the decode loop.
+    if width > limits.max_width as usize {
+        return Err(Error::too_large(format!(
+            "HDR: resolution width {width} exceeds HdrLimits::max_width ({})",
+            limits.max_width
+        )));
+    }
+    if height > limits.max_height as usize {
+        return Err(Error::too_large(format!(
+            "HDR: resolution height {height} exceeds HdrLimits::max_height ({})",
+            limits.max_height
+        )));
+    }
+    // Pixel-buffer size in bytes: `width * height * 3 * 4`. Use
+    // `checked_mul` so a hostile combination that still slips past the
+    // per-axis caps (e.g. when the caller relaxes the dimension caps
+    // but keeps `max_pixel_bytes` tight) is rejected at the arithmetic
+    // level rather than wrapping.
+    let pixel_count = width
+        .checked_mul(height)
+        .ok_or_else(|| Error::too_large("HDR: width × height overflows usize"))?;
+    let buf_bytes = pixel_count
+        .checked_mul(12)
+        .ok_or_else(|| Error::too_large("HDR: pixel-buffer size overflows usize"))?;
+    if buf_bytes > limits.max_pixel_bytes {
+        return Err(Error::too_large(format!(
+            "HDR: pixel-buffer size {buf_bytes} bytes exceeds HdrLimits::max_pixel_bytes ({})",
+            limits.max_pixel_bytes
+        )));
+    }
     header.x_sign = x_sign;
     header.y_sign = y_sign;
     header.x_first = x_first;
@@ -337,7 +404,16 @@ fn decode_pixel_rows(
     height: usize,
     fallback: FallbackMode,
 ) -> Result<Vec<f32>> {
-    let mut pixels = vec![0.0f32; width * height * 3];
+    // Defensive guard: `parse_resolution` already applies HdrLimits +
+    // checked_mul on the same product, but `decode_pixel_rows` is
+    // pub(crate) and would be reachable from a future test / helper
+    // that bypasses the resolution-line gate. Keep the overflow check
+    // here so the float-count multiplication never wraps.
+    let float_count = width
+        .checked_mul(height)
+        .and_then(|n| n.checked_mul(3))
+        .ok_or_else(|| Error::too_large("HDR: width × height × 3 overflows usize"))?;
+    let mut pixels = vec![0.0f32; float_count];
     let mut prev_pixel: Option<[u8; 4]> = None;
     for y in 0..height {
         let chans = decode_scanline_with_fallback(input, cursor, width, &mut prev_pixel, fallback)?;
@@ -537,5 +613,86 @@ mod tests {
         let mut cursor = 0usize;
         let header = parse_header(bytes, &mut cursor).unwrap();
         assert_eq!(header.exposure, Some(1.5));
+    }
+
+    #[test]
+    fn limits_reject_oversize_width_before_allocation() {
+        // A resolution line declaring width 2 000 000 000 would, with
+        // the round 1..201 decoder, attempt to allocate ~24 GiB of
+        // float pixel buffer. The default HdrLimits cap (max_width =
+        // 32_767) rejects the file at parse time.
+        let bytes = b"#?RADIANCE\n\n-Y 1 +X 2000000000\n";
+        let err = parse_hdr(bytes).unwrap_err();
+        assert!(matches!(err, Error::TooLarge(_)), "got {err:?}");
+    }
+
+    #[test]
+    fn limits_reject_oversize_height_before_allocation() {
+        let bytes = b"#?RADIANCE\n\n-Y 2000000000 +X 8\n";
+        let err = parse_hdr(bytes).unwrap_err();
+        assert!(matches!(err, Error::TooLarge(_)), "got {err:?}");
+    }
+
+    #[test]
+    fn limits_reject_pixel_byte_overrun() {
+        // 32 767 × 32 767 = ~1 G pixels, ×12 B = ~12 GiB — well past
+        // the 256 MiB default pixel-buffer cap. Both per-axis dimensions
+        // sit at the very edge of `max_width` / `max_height`, so the
+        // pixel-byte cap is what fires.
+        let bytes = b"#?RADIANCE\n\n-Y 32767 +X 32767\n";
+        let err = parse_hdr(bytes).unwrap_err();
+        assert!(matches!(err, Error::TooLarge(_)), "got {err:?}");
+    }
+
+    #[test]
+    fn limits_unbounded_admits_larger_dimensions_via_with_limits() {
+        // The same 32_767 × 32_767 header above must be accepted past
+        // the dimension check with `HdrLimits::unbounded`; the request
+        // still fails downstream (the pixel section isn't present), but
+        // with `InvalidData` rather than `TooLarge`.
+        let bytes = b"#?RADIANCE\n\n-Y 32767 +X 32767\n";
+        let err = parse_hdr_with_limits(bytes, &HdrLimits::unbounded()).unwrap_err();
+        // Past the resolution-line gate, the absent pixel section will
+        // either trip the new-RLE truncation guard (InvalidData) or
+        // the per-row decode error — but NOT `TooLarge`. We assert the
+        // negative so the test remains correct if the downstream error
+        // shape evolves.
+        assert!(
+            !matches!(err, Error::TooLarge(_)),
+            "unbounded limits should not raise TooLarge, got {err:?}",
+        );
+    }
+
+    #[test]
+    fn limits_custom_pixel_byte_cap_rejects_borderline_input() {
+        // Tighten the pixel-byte cap to 1 KiB so even a 16×4 header
+        // (16 × 4 × 12 = 768 B fits, but 32 × 4 × 12 = 1 536 B does
+        // not) is rejected. The dimension caps are kept at their
+        // default to confirm the pixel-byte axis fires independently.
+        let bytes = b"#?RADIANCE\n\n-Y 4 +X 32\n";
+        let custom = HdrLimits {
+            max_pixel_bytes: 1024,
+            ..HdrLimits::default()
+        };
+        let err =
+            parse_hdr_with_options_and_limits(bytes, FallbackMode::OldRle, &custom).unwrap_err();
+        assert!(matches!(err, Error::TooLarge(_)), "got {err:?}");
+    }
+
+    #[test]
+    fn limits_accept_typical_image_dimensions() {
+        // Round 1..201 corpus dimensions (32×16 etc.) must continue to
+        // parse at the defaults. This is the "no regression" anchor:
+        // the limit additions must not change the happy-path verdict
+        // for any image the existing test suite decodes.
+        let bytes = b"#?RADIANCE\n\n-Y 16 +X 32\n";
+        // Header is parseable to the point of the resolution line; the
+        // pixel section is missing so the decode fails downstream, but
+        // not with TooLarge.
+        let err = parse_hdr(bytes).unwrap_err();
+        assert!(
+            !matches!(err, Error::TooLarge(_)),
+            "32×16 must clear the default limits, got {err:?}",
+        );
     }
 }

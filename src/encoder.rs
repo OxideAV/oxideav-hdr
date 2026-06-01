@@ -79,7 +79,7 @@ pub enum RleMode {
     /// writer perturbs those to dodge the run-sentinel ambiguity), or
     /// when targeting a consumer that doesn't grok either RLE flavour.
     /// Pair with [`crate::rle::FallbackMode::Uncompressed`] on the read
-    /// side via [`parse_hdr_with_options`].
+    /// side via [`crate::decoder::parse_hdr_with_options`].
     Uncompressed,
 }
 

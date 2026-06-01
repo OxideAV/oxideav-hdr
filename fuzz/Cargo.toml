@@ -1,0 +1,85 @@
+[package]
+name = "oxideav-hdr-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+
+[package.metadata]
+cargo-fuzz = true
+
+# Radiance HDR fuzzing targets. The on-disk format has three
+# attacker-attended sub-grammars:
+#
+#  * The text `KEY=VALUE` header (variable-length UTF-8 strings, the
+#    `EXPOSURE` / `COLORCORR` / `PRIMARIES` float parses, the
+#    `KEY=VALUE` split, the empty-line terminator).
+#  * The resolution line — eight axis-flag orderings, two integers
+#    (width + height) parsed straight out of the file. Round 202 added
+#    `HdrLimits` to gate the integers; the `decode` and `roundtrip`
+#    targets exercise the default and unbounded limit modes so any
+#    future change to the gating logic shows up here first.
+#  * The pixel section — new-RLE (`0x02 0x02 hi lo` marker + per-
+#    channel literal/repeat runs), old-RLE (per-pixel literals chained
+#    with `(1,1,1,n)` sentinel pixels), and uncompressed (flat
+#    `4 * width` byte RGBE quads with no sentinels). All three are
+#    reachable from arbitrary fuzz input.
+#
+# Three targets:
+#
+#  * `decode`     — feed arbitrary bytes to `parse_hdr` and assert the
+#                   call always *returns* (Result-vs-panic). Default
+#                   `HdrLimits` apply, so the worst-case allocation is
+#                   capped at the 256 MiB pixel-byte ceiling. Catches
+#                   panics, integer overflows on dimension arithmetic,
+#                   out-of-bounds reads in the RLE inner loops, and any
+#                   downstream assertion the decoder might trip on
+#                   malformed input.
+#  * `roundtrip`  — synthesise a valid HDR file from fuzz-controlled
+#                   small dimensions + a synthetic gradient, encode it,
+#                   decode the encoded bytes, and assert the dimensions
+#                   survive end-to-end. Catches encoder/decoder
+#                   asymmetries (mismatched axis-flag handling, RLE
+#                   marker confusion).
+#  * `headers`    — focus the corpus on the text header parse: prepend
+#                   `#?RADIANCE\n` and a fuzz-supplied header body, then
+#                   a minimal `\n-Y 1 +X 8\n` resolution line plus 32
+#                   bytes of synthetic pixel payload. Stresses the
+#                   `KEY=VALUE` split + the float / chromaticity
+#                   parses + the comment-line handling. The pixel-side
+#                   harness covers the rest of the surface.
+#
+# The crate is pulled in with `default-features = false` so the fuzz
+# build exercises the framework-free standalone `parse_hdr` /
+# `encode_hdr` path and never links `oxideav-core`.
+
+[dependencies]
+libfuzzer-sys = "0.4"
+
+[dependencies.oxideav-hdr]
+path = ".."
+default-features = false
+
+# Prevent this from interfering with the umbrella workspace.
+[workspace]
+members = ["."]
+
+[profile.release]
+debug = 1
+
+[[bin]]
+name = "decode"
+path = "fuzz_targets/decode.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "roundtrip"
+path = "fuzz_targets/roundtrip.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "headers"
+path = "fuzz_targets/headers.rs"
+test = false
+doc = false
