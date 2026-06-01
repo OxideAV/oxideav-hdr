@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.0.4](https://github.com/OxideAV/oxideav-hdr/compare/v0.0.3...v0.0.4) - 2026-06-01
+
+### Other
+
+- round 202 — HdrLimits resource guard + cargo-fuzz harness
+
 ### Added
 
 - Round 202 (depth mode — hardening + fuzz harness): new
