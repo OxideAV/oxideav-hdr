@@ -9,6 +9,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Round 208 (spec-compliance — cumulative `PIXASPECT`): closed the
+  last "multiple records stack" gap from the Radiance reference
+  manual. The reference manual lists `PIXASPECT=` alongside
+  `EXPOSURE=` and `COLORCORR=` as a *cumulative* (multiplicative)
+  record — when several appear, the effective pixel aspect ratio is
+  their product, and the default when no record is present is `1.0`
+  (square pixels). Through round 207 the decoder kept only the last
+  `PIXASPECT=` value seen (overwrite semantics); round 208 folds the
+  values into a running product, matching the multiple-`EXPOSURE` /
+  multiple-`COLORCORR` paths added in earlier rounds. The new
+  `HdrImage::effective_pixaspect` helper returns the resulting `f32`
+  with the reference-manual `1.0` default substituted when no record
+  was present, so consumers can avoid the `Option::unwrap_or`
+  ceremony at every call site. Two new decoder unit tests pin the
+  cumulative stack (three records `2.0 * 0.5 * 1.25 = 1.25`) and the
+  single-record no-regression path, and two new image-module tests
+  cover the helper's default-vs-set branches. The single-record happy
+  path is bit-identical to round 207 (the running product is
+  initialised from the first value, so one record decodes to its
+  literal value); existing fixtures and the round-192 regression
+  test pass unchanged.
+
 - Round 202 (depth mode — hardening + fuzz harness): new
   `HdrLimits` decoder resource-limit type plus the matching
   `parse_hdr_with_limits` / `parse_hdr_with_options_and_limits` public

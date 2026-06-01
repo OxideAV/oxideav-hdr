@@ -97,6 +97,21 @@ mod tests {
     }
 
     #[test]
+    fn effective_pixaspect_defaults_to_one_when_absent() {
+        // No PIXASPECT record → reference-manual default of 1.0.
+        let img = HdrImage::new_rgb96f(1, 1, vec![0.0, 0.0, 0.0]);
+        assert!(img.header.pixaspect.is_none());
+        assert!((img.effective_pixaspect() - 1.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn effective_pixaspect_returns_header_value_when_set() {
+        let mut img = HdrImage::new_rgb96f(1, 1, vec![0.0, 0.0, 0.0]);
+        img.header.pixaspect = Some(0.5);
+        assert!((img.effective_pixaspect() - 0.5).abs() < 1e-6);
+    }
+
+    #[test]
     fn apply_colorcorr_unit_vector_is_a_no_op() {
         let mut img = HdrImage::new_rgb96f(1, 1, vec![0.7, 0.5, 0.3]);
         img.header.colorcorr = Some([1.0, 1.0, 1.0]);
@@ -205,6 +220,22 @@ impl HdrImage {
             ));
         }
         out
+    }
+
+    /// Pixel aspect ratio (`pixel height / pixel width`) the picture
+    /// declared via one or more `PIXASPECT=` records, with the
+    /// reference-manual default of `1.0` applied when no record was
+    /// present.
+    ///
+    /// The Radiance reference manual defines `PIXASPECT=` as a
+    /// multiplicative-cumulative scalar: the *effective* aspect ratio
+    /// is the product of every `PIXASPECT=` record in the header, and
+    /// `1.0` when none appears. The decoder folds the multiplication
+    /// into [`HdrHeader::pixaspect`] at parse time so this helper just
+    /// substitutes the `None` → `1.0` default for the caller without
+    /// any extra arithmetic.
+    pub fn effective_pixaspect(&self) -> f32 {
+        self.header.pixaspect.unwrap_or(1.0)
     }
 
     /// Apply the header's `COLORCORR` per-channel multiplier to every

@@ -17,7 +17,7 @@ Clean-room implementation against the published format documentation
 Radiance source / `image` crate's `hdr` submodule / Greg Ward's
 reference C code consulted.
 
-## Coverage (round 202)
+## Coverage (round 208)
 
 | Feature                      | Read | Write |
 |------------------------------|:----:|:-----:|
@@ -25,8 +25,9 @@ reference C code consulted.
 | `KEY=VALUE` header records   |  Y   |   Y   |
 | `EXPOSURE` / `GAMMA` / `PIXASPECT` / `SOFTWARE` | Y | Y |
 | `VIEW=` renderer view-parameter record | Y | Y |
-| Multiple `EXPOSURE` / `COLORCORR` records stacked multiplicatively | Y | n/a |
+| Multiple `EXPOSURE` / `COLORCORR` / `PIXASPECT` records stacked multiplicatively | Y | n/a |
 | `COLORCORR` (3-float)        |  Y   |   Y   |
+| `HdrImage::effective_pixaspect` (header value or reference-manual default `1.0`) | helper | n/a |
 | `PRIMARIES` (8-float chromaticity) | Y |   Y   |
 | All 8 axis-flag combinations |  Y   |  Y (Y-first + X-first transpose) |
 | 32-bit_rle_rgbe pixels       |  Y   |   Y   |

@@ -235,12 +235,19 @@ fn parse_header(input: &[u8], cursor: &mut usize) -> Result<HdrHeader> {
                 );
             }
             "PIXASPECT" => {
-                header.pixaspect = Some(
-                    value
-                        .trim()
-                        .parse::<f32>()
-                        .map_err(|_| Error::invalid("HDR: invalid PIXASPECT"))?,
-                );
+                // Per the Radiance reference manual, PIXASPECT is
+                // cumulative — when multiple records appear the
+                // pixel aspect ratio is the product of all of them.
+                // The default when no PIXASPECT record is present is
+                // 1.0 (square pixels); see HdrImage::effective_pixaspect.
+                let v = value
+                    .trim()
+                    .parse::<f32>()
+                    .map_err(|_| Error::invalid("HDR: invalid PIXASPECT"))?;
+                header.pixaspect = Some(match header.pixaspect {
+                    Some(prev) => prev * v,
+                    None => v,
+                });
             }
             "SOFTWARE" => {
                 header.software = Some(value.to_owned());
@@ -582,6 +589,29 @@ mod tests {
             cc[1]
         );
         assert!((cc[2] - 2.0).abs() < 1e-6, "B: expected 2.0, got {}", cc[2]);
+    }
+
+    #[test]
+    fn multiple_pixaspect_records_stack_multiplicatively() {
+        // Per the Radiance reference manual, PIXASPECT is cumulative:
+        // when multiple records appear the *effective* aspect ratio is
+        // their product. Three records (2.0, 0.5, 1.25) should land at
+        // 1.25 in the decoded header.
+        let bytes = b"#?RADIANCE\nPIXASPECT=2.0\nPIXASPECT=0.5\nPIXASPECT=1.25\n\n-Y 1 +X 8\n";
+        let mut cursor = 0usize;
+        let header = parse_header(bytes, &mut cursor).unwrap();
+        let p = header.pixaspect.expect("PIXASPECT missing");
+        assert!((p - 1.25).abs() < 1e-6, "expected 1.25, got {p}");
+    }
+
+    #[test]
+    fn single_pixaspect_record_is_passed_through() {
+        // The cumulative stacking must not perturb the single-record
+        // case (the round 1..207 happy path).
+        let bytes = b"#?RADIANCE\nPIXASPECT=0.75\n\n-Y 1 +X 8\n";
+        let mut cursor = 0usize;
+        let header = parse_header(bytes, &mut cursor).unwrap();
+        assert_eq!(header.pixaspect, Some(0.75));
     }
 
     #[test]
