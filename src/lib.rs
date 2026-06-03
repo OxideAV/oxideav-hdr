@@ -65,8 +65,8 @@ pub use rle::FallbackMode;
 pub use tonemap::{tone_map, ToneMap};
 pub use xyz::{
     convert_image_rgb_to_xyz, convert_image_xyz_to_rgb, luminance_lm_per_sr_per_m2, rgb_to_xyz,
-    rgb_to_xyz_matrix, xyz_to_rgb, xyz_to_rgb_matrix, RgbColorSpace, RGBE_BRIGHT_COEFFS,
-    WHTEFFICACY,
+    rgb_to_xyz_matrix, rgb_to_xyz_matrix_from_primaries, xyz_to_rgb, xyz_to_rgb_matrix,
+    xyz_to_rgb_matrix_from_primaries, RgbColorSpace, RGBE_BRIGHT_COEFFS, WHTEFFICACY,
 };
 
 #[cfg(feature = "registry")]

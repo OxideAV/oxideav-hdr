@@ -201,6 +201,112 @@ fn apply_matrix(m: [[f32; 3]; 3], v: [f32; 3]) -> [f32; 3] {
     ]
 }
 
+/// Derive the linear `RGB → CIE XYZ` matrix from an arbitrary
+/// [`crate::Primaries`] record using the standard primary-construction
+/// procedure (BT.709 §3 / IEC 61966-2-1 Annex C).
+///
+/// Given primary chromaticities `(xR, yR)`, `(xG, yG)`, `(xB, yB)` and a
+/// reference white `(xW, yW)`, each primary's XYZ tristimulus values are
+/// `Xi = xi / yi`, `Yi = 1`, `Zi = (1 - xi - yi) / yi`. The unscaled
+/// matrix `[X_R X_G X_B; Y_R Y_G Y_B; Z_R Z_G Z_B]` is then post-scaled
+/// by per-primary luminance scalars `(SR, SG, SB)` chosen so that
+/// `[1 1 1]^T` maps to the white-point XYZ, i.e.
+/// `[SR SG SB]^T = M_unscaled^{-1} * [Xw Yw Zw]^T`.
+///
+/// The derivation is purely algebraic and pulls in no `PRIMARIES`
+/// matrix beyond the eight CIE xy floats the [`crate::Primaries`]
+/// record already carries. Returns `None` when the primaries are
+/// degenerate (any `y == 0`, or a singular unscaled matrix); the
+/// reference manual treats such records as malformed and leaves their
+/// interpretation undefined, so callers can treat `None` as "fall back
+/// to a known-good matrix" (e.g. `rgb_to_xyz_matrix(RgbColorSpace::Srgb)`).
+///
+/// This is the matrix that turns the `0.640 0.330 0.290 0.600 0.150
+/// 0.060 1/3 1/3` Radiance default into the
+/// [`RgbColorSpace::Radiance`] entry of [`rgb_to_xyz_matrix`] within
+/// `f32` precision, and the sRGB chromaticities (`Primaries::SRGB`)
+/// into the IEC 61966-2-1 Annex C entry within `f32` precision —
+/// callers that need a matrix for a primaries record the named
+/// `RgbColorSpace` enum doesn't cover (e.g. `Primaries::P3_D65`,
+/// `Primaries::REC2020`, or a custom 8-float `PRIMARIES=` record from a
+/// niche renderer) get the right linear matrix without hard-coding new
+/// constants into the crate.
+pub fn rgb_to_xyz_matrix_from_primaries(p: crate::Primaries) -> Option<[[f32; 3]; 3]> {
+    // Reject any zero-Y chromaticity (X = x/y, Z = (1-x-y)/y blow up).
+    if p.red.1 == 0.0 || p.green.1 == 0.0 || p.blue.1 == 0.0 || p.white.1 == 0.0 {
+        return None;
+    }
+    // Per-primary XYZ tristimulus values.
+    let xy_to_xyz = |(x, y): (f32, f32)| -> [f32; 3] {
+        let z = 1.0 - x - y;
+        [x / y, 1.0, z / y]
+    };
+    let r = xy_to_xyz(p.red);
+    let g = xy_to_xyz(p.green);
+    let b = xy_to_xyz(p.blue);
+    let w = xy_to_xyz(p.white);
+    // Unscaled matrix (columns = primary tristimulus values).
+    let m = [[r[0], g[0], b[0]], [r[1], g[1], b[1]], [r[2], g[2], b[2]]];
+    // Invert m by cofactor expansion (we already have a 3×3; no need
+    // for a general LU). det = r dot (g × b).
+    let det = m[0][0] * (m[1][1] * m[2][2] - m[1][2] * m[2][1])
+        - m[0][1] * (m[1][0] * m[2][2] - m[1][2] * m[2][0])
+        + m[0][2] * (m[1][0] * m[2][1] - m[1][1] * m[2][0]);
+    if det.abs() < f32::EPSILON {
+        return None;
+    }
+    let inv = invert3x3(m, det);
+    // Per-primary luminance scalars: m^-1 * w.
+    let s = apply_matrix(inv, w);
+    // Final matrix: each column of `m` scaled by `s_i`.
+    Some([
+        [s[0] * m[0][0], s[1] * m[0][1], s[2] * m[0][2]],
+        [s[0] * m[1][0], s[1] * m[1][1], s[2] * m[1][2]],
+        [s[0] * m[2][0], s[1] * m[2][1], s[2] * m[2][2]],
+    ])
+}
+
+/// Inverse of [`rgb_to_xyz_matrix_from_primaries`]: derive the
+/// `CIE XYZ → RGB` matrix for an arbitrary [`crate::Primaries`] record.
+///
+/// Implementation: derive the forward matrix and invert it (3×3
+/// cofactor expansion). Returns `None` for the same degenerate cases
+/// as the forward helper, plus any non-invertible scaled matrix.
+pub fn xyz_to_rgb_matrix_from_primaries(p: crate::Primaries) -> Option<[[f32; 3]; 3]> {
+    let m = rgb_to_xyz_matrix_from_primaries(p)?;
+    let det = m[0][0] * (m[1][1] * m[2][2] - m[1][2] * m[2][1])
+        - m[0][1] * (m[1][0] * m[2][2] - m[1][2] * m[2][0])
+        + m[0][2] * (m[1][0] * m[2][1] - m[1][1] * m[2][0]);
+    if det.abs() < f32::EPSILON {
+        return None;
+    }
+    Some(invert3x3(m, det))
+}
+
+/// 3×3 cofactor inverse. `det` is passed in so callers that already
+/// computed it don't redo the work.
+#[inline]
+fn invert3x3(m: [[f32; 3]; 3], det: f32) -> [[f32; 3]; 3] {
+    let inv_det = 1.0 / det;
+    [
+        [
+            (m[1][1] * m[2][2] - m[1][2] * m[2][1]) * inv_det,
+            (m[0][2] * m[2][1] - m[0][1] * m[2][2]) * inv_det,
+            (m[0][1] * m[1][2] - m[0][2] * m[1][1]) * inv_det,
+        ],
+        [
+            (m[1][2] * m[2][0] - m[1][0] * m[2][2]) * inv_det,
+            (m[0][0] * m[2][2] - m[0][2] * m[2][0]) * inv_det,
+            (m[0][2] * m[1][0] - m[0][0] * m[1][2]) * inv_det,
+        ],
+        [
+            (m[1][0] * m[2][1] - m[1][1] * m[2][0]) * inv_det,
+            (m[0][1] * m[2][0] - m[0][0] * m[2][1]) * inv_det,
+            (m[0][0] * m[1][1] - m[0][1] * m[1][0]) * inv_det,
+        ],
+    ]
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -338,5 +444,182 @@ mod tests {
         for (i, (got, want)) in img.pixels.iter().zip(pixels.iter()).enumerate() {
             assert!((got - want).abs() < 1e-4, "pixel {i}: {want} vs {got}");
         }
+    }
+
+    #[test]
+    fn derived_matrix_for_srgb_matches_named_constant() {
+        // Feeding `Primaries::SRGB` (the IEC 61966-2-1 Annex C
+        // chromaticities) into the chromaticity-derived helper must
+        // recover the hard-coded `RgbColorSpace::Srgb` matrix within
+        // f32 precision. The named constant is just an algebraic
+        // simplification of the same derivation.
+        let derived = rgb_to_xyz_matrix_from_primaries(crate::Primaries::SRGB)
+            .expect("sRGB primaries derive to a valid matrix");
+        let named = rgb_to_xyz_matrix(RgbColorSpace::Srgb);
+        for (r, (drow, nrow)) in derived.iter().zip(named.iter()).enumerate() {
+            for (c, (d, n)) in drow.iter().zip(nrow.iter()).enumerate() {
+                assert!(
+                    (d - n).abs() < 1e-3,
+                    "row {r} col {c}: derived={d} named={n}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn derived_matrix_for_radiance_matches_named_constant() {
+        // Same check against Greg Ward's E-white Radiance primaries.
+        let derived = rgb_to_xyz_matrix_from_primaries(crate::Primaries::RADIANCE)
+            .expect("Radiance primaries derive to a valid matrix");
+        let named = rgb_to_xyz_matrix(RgbColorSpace::Radiance);
+        for (r, (drow, nrow)) in derived.iter().zip(named.iter()).enumerate() {
+            for (c, (d, n)) in drow.iter().zip(nrow.iter()).enumerate() {
+                assert!(
+                    (d - n).abs() < 1e-3,
+                    "row {r} col {c}: derived={d} named={n}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn derived_matrix_maps_unit_rgb_to_white_xyz() {
+        // The whole point of the per-primary luminance scaling step is
+        // that `[1 1 1]^T` maps to the reference white's CIE XYZ. With
+        // a D65 white (Y normalised to 1), Y must come out at exactly
+        // 1.0 within f32 precision.
+        for primaries in [
+            crate::Primaries::SRGB,
+            crate::Primaries::P3_D65,
+            crate::Primaries::REC2020,
+            crate::Primaries::RADIANCE,
+        ] {
+            let m = rgb_to_xyz_matrix_from_primaries(primaries).unwrap();
+            let xyz = apply_matrix(m, [1.0, 1.0, 1.0]);
+            assert!(
+                (xyz[1] - 1.0).abs() < 1e-4,
+                "Y for {primaries:?}: {} (expected 1.0)",
+                xyz[1]
+            );
+            // The X/Z components match the white-point chromaticity
+            // `(xw/yw, 1, (1-xw-yw)/yw)`.
+            let xw = primaries.white.0 / primaries.white.1;
+            let zw = (1.0 - primaries.white.0 - primaries.white.1) / primaries.white.1;
+            assert!(
+                (xyz[0] - xw).abs() < 1e-4,
+                "X for {primaries:?}: {} expected {xw}",
+                xyz[0]
+            );
+            assert!(
+                (xyz[2] - zw).abs() < 1e-4,
+                "Z for {primaries:?}: {} expected {zw}",
+                xyz[2]
+            );
+        }
+    }
+
+    #[test]
+    fn derived_matrix_round_trips_through_inverse() {
+        // The two derived matrices are mutual inverses; their product
+        // is the identity within f32 precision. Tested for each named
+        // primaries constant the crate ships.
+        for primaries in [
+            crate::Primaries::SRGB,
+            crate::Primaries::P3_D65,
+            crate::Primaries::REC2020,
+            crate::Primaries::RADIANCE,
+        ] {
+            let m = rgb_to_xyz_matrix_from_primaries(primaries).unwrap();
+            let inv = xyz_to_rgb_matrix_from_primaries(primaries).unwrap();
+            // Verify m * inv ≈ identity.
+            for (r, mrow) in m.iter().enumerate() {
+                for c in 0..3 {
+                    let v: f32 = mrow
+                        .iter()
+                        .zip(inv.iter())
+                        .map(|(mv, irow)| mv * irow[c])
+                        .sum();
+                    let expected = if r == c { 1.0 } else { 0.0 };
+                    assert!(
+                        (v - expected).abs() < 1e-3,
+                        "{primaries:?} row {r} col {c}: {v} vs {expected}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn derived_matrix_rejects_degenerate_white_point() {
+        // A `yW = 0` chromaticity (X = xw/0 is non-finite). The helper
+        // must refuse to silently emit `inf`s.
+        let bad = crate::Primaries {
+            red: (0.640, 0.330),
+            green: (0.290, 0.600),
+            blue: (0.150, 0.060),
+            white: (0.5, 0.0),
+        };
+        assert!(rgb_to_xyz_matrix_from_primaries(bad).is_none());
+        assert!(xyz_to_rgb_matrix_from_primaries(bad).is_none());
+    }
+
+    #[test]
+    fn derived_matrix_rejects_zero_y_primary() {
+        // Any `yi = 0` primary makes the per-primary Y = 1/y blow up.
+        // Rejected with `None`.
+        let bad = crate::Primaries {
+            red: (0.640, 0.000),
+            green: (0.290, 0.600),
+            blue: (0.150, 0.060),
+            white: (1.0 / 3.0, 1.0 / 3.0),
+        };
+        assert!(rgb_to_xyz_matrix_from_primaries(bad).is_none());
+    }
+
+    #[test]
+    fn derived_matrix_for_p3_d65_maps_white_to_d65_xyz() {
+        // Per the Display P3 spec: the white is D65 with nominal XYZ
+        // (0.9505, 1.0000, 1.0890). The derived matrix's column sum
+        // (i.e. `M * [1 1 1]^T`) must match those values.
+        let m = rgb_to_xyz_matrix_from_primaries(crate::Primaries::P3_D65).unwrap();
+        let xyz = apply_matrix(m, [1.0, 1.0, 1.0]);
+        assert!(
+            (xyz[0] - 0.9505).abs() < 1e-3,
+            "X for P3-D65: {} (expected 0.9505)",
+            xyz[0]
+        );
+        assert!(
+            (xyz[1] - 1.0000).abs() < 1e-3,
+            "Y for P3-D65: {} (expected 1.0)",
+            xyz[1]
+        );
+        assert!(
+            (xyz[2] - 1.0890).abs() < 1e-3,
+            "Z for P3-D65: {} (expected 1.0890)",
+            xyz[2]
+        );
+    }
+
+    #[test]
+    fn derived_matrix_for_rec2020_maps_white_to_d65_xyz() {
+        // Rec.2020 also uses a D65 white. Same expected XYZ as sRGB and
+        // P3 — only the per-primary gamut changes.
+        let m = rgb_to_xyz_matrix_from_primaries(crate::Primaries::REC2020).unwrap();
+        let xyz = apply_matrix(m, [1.0, 1.0, 1.0]);
+        assert!(
+            (xyz[0] - 0.9505).abs() < 1e-3,
+            "X for Rec.2020: {} (expected 0.9505)",
+            xyz[0]
+        );
+        assert!(
+            (xyz[1] - 1.0000).abs() < 1e-3,
+            "Y for Rec.2020: {} (expected 1.0)",
+            xyz[1]
+        );
+        assert!(
+            (xyz[2] - 1.0890).abs() < 1e-3,
+            "Z for Rec.2020: {} (expected 1.0890)",
+            xyz[2]
+        );
     }
 }

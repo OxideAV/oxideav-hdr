@@ -9,6 +9,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Round 226 (spec-compliance — chromaticity-derived `RGB ↔ XYZ`
+  matrices): two new `xyz` module helpers,
+  `rgb_to_xyz_matrix_from_primaries(p: Primaries) -> Option<[[f32; 3];
+  3]>` and `xyz_to_rgb_matrix_from_primaries(p) -> Option<[[f32; 3];
+  3]>`, that derive a full linear `RGB → CIE XYZ` (and inverse) matrix
+  from any [`Primaries`] record's eight CIE xy chromaticity floats
+  using the standard primary-construction procedure documented in
+  BT.709 §3 / IEC 61966-2-1 Annex C. Through round 225 the crate only
+  shipped pre-computed matrices for two named `RgbColorSpace` variants
+  (`Srgb`, `Radiance`); files that carried a wide-gamut `PRIMARIES=`
+  record (e.g. `Primaries::P3_D65` or `Primaries::REC2020`, both
+  added in round 4) or a custom 8-float record from a niche renderer
+  had no equivalent matrix path — consumers had to either fall back to
+  the sRGB matrix (wrong for wide-gamut content) or hand-derive the
+  matrix from the eight floats themselves. The new helpers do the
+  derivation in-crate using only the existing `Primaries` struct, a
+  3×3 cofactor expansion, and `f32` arithmetic. Eight new unit tests
+  pin the contract: the derived sRGB / Radiance matrices match the
+  hard-coded `RgbColorSpace` constants within `f32` precision (1e-3),
+  `[1, 1, 1]^T` maps to the correct CIE XYZ for every named primaries
+  constant the crate ships (sRGB / Radiance / P3-D65 / Rec.2020), the
+  forward and inverse matrices are mutual inverses, the helpers reject
+  degenerate `yW = 0` and zero-Y-primary records by returning `None`
+  rather than emitting `inf`s, and the P3-D65 / Rec.2020 derived
+  matrices map unit RGB to the nominal D65 XYZ `(0.9505, 1.0000,
+  1.0890)` within `f32` precision. The existing `rgb_to_xyz_matrix` /
+  `xyz_to_rgb_matrix` constants and the round-1..225 happy path are
+  bit-identical — the helpers are purely additive.
+
 - Round 220 (spec-compliance — original-radiance recovery): two new
   `HdrImage` helpers, `recover_original_radiance` and
   `recover_original_colorcorr`, that divide the float buffer by the
