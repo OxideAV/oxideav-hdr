@@ -17,7 +17,7 @@ Clean-room implementation against the published format documentation
 Radiance source / `image` crate's `hdr` submodule / Greg Ward's
 reference C code consulted.
 
-## Coverage (round 214)
+## Coverage (round 220)
 
 | Feature                      | Read | Write |
 |------------------------------|:----:|:-----:|
@@ -41,6 +41,8 @@ reference C code consulted.
 | Decoder resource limits (`HdrLimits`) | Y (default 32 767 × 32 767, ≤ 256 MiB pixel buffer, `parse_hdr_with_limits` / `parse_hdr_with_options_and_limits` for custom) | n/a |
 | `HdrImage::apply_exposure`   |  decode helper |  n/a |
 | `HdrImage::apply_colorcorr`  |  decode helper |  n/a |
+| `HdrImage::recover_original_radiance` (spec-canonical undo of `EXPOSURE=` — divides the buffer by the cumulative factor to reconstruct scene-referred radiance, per the staged spec's "divide file values by the product of all EXPOSURE settings" rule) | decode helper | n/a |
+| `HdrImage::recover_original_colorcorr` (per-channel reciprocal of `apply_colorcorr` — reconstructs pre-correction radiance for files that carry `COLORCORR=`) | decode helper | n/a |
 | XYZE ↔ RGB (sRGB / Radiance) |  -   | helpers |
 | `Primaries::SRGB` / `RADIANCE` / `P3_D65` / `REC2020` constants | n/a | constants |
 | Tone-mapping (Linear / Gamma / Reinhard / ReinhardExtended / ReinhardLuminance / Hable / Drago / ACES) | - | helpers |

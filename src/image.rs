@@ -159,6 +159,178 @@ mod tests {
     }
 
     #[test]
+    fn recover_original_radiance_divides_pixels_and_clears_header() {
+        // Per the staged spec: stored = original × EXPOSURE; recover
+        // original by dividing. With EXPOSURE=0.5 the stored 0.5 maps
+        // back to a scene-referred 1.0; the stored 0.25 maps back to
+        // 0.5. The slot is cleared after recovery.
+        let mut img = HdrImage::new_rgb96f(1, 2, vec![0.5, 0.25, 0.125, 1.0, 0.5, 0.25]);
+        img.header.exposure = Some(0.5);
+        img.recover_original_radiance();
+        assert!(
+            img.header.exposure.is_none(),
+            "exposure slot not cleared after recovery"
+        );
+        // Pixel 0: 0.5 / 0.5 = 1.0
+        assert!((img.pixels[0] - 1.0).abs() < 1e-6);
+        assert!((img.pixels[1] - 0.5).abs() < 1e-6);
+        assert!((img.pixels[2] - 0.25).abs() < 1e-6);
+        // Pixel 1: 1.0 / 0.5 = 2.0
+        assert!((img.pixels[3] - 2.0).abs() < 1e-6);
+        assert!((img.pixels[4] - 1.0).abs() < 1e-6);
+        assert!((img.pixels[5] - 0.5).abs() < 1e-6);
+        // Second call is a no-op (slot already None).
+        img.recover_original_radiance();
+        assert!((img.pixels[0] - 1.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn recover_original_radiance_with_none_does_nothing() {
+        // Spec: "No EXPOSURE ⇒ none applied." Method is a no-op when the
+        // slot is absent.
+        let mut img = HdrImage::new_rgb96f(1, 1, vec![1.0, 0.5, 0.25]);
+        assert!(img.header.exposure.is_none());
+        img.recover_original_radiance();
+        assert!((img.pixels[0] - 1.0).abs() < 1e-6);
+        assert!((img.pixels[1] - 0.5).abs() < 1e-6);
+        assert!((img.pixels[2] - 0.25).abs() < 1e-6);
+    }
+
+    #[test]
+    fn recover_original_radiance_unit_factor_is_a_no_op() {
+        // EXPOSURE=1.0: division by 1.0 is the identity. Pixels stay
+        // untouched, the slot is still cleared.
+        let mut img = HdrImage::new_rgb96f(1, 1, vec![0.5, 0.25, 0.125]);
+        img.header.exposure = Some(1.0);
+        img.recover_original_radiance();
+        assert!(img.header.exposure.is_none());
+        assert!((img.pixels[0] - 0.5).abs() < 1e-6);
+        assert!((img.pixels[1] - 0.25).abs() < 1e-6);
+        assert!((img.pixels[2] - 0.125).abs() < 1e-6);
+    }
+
+    #[test]
+    fn recover_original_radiance_zero_factor_does_not_blow_up() {
+        // A literal EXPOSURE=0 record is degenerate (division would
+        // produce non-finite values). The method clears the slot but
+        // leaves the pixels untouched rather than emitting NaN/inf.
+        let mut img = HdrImage::new_rgb96f(1, 1, vec![0.5, 0.25, 0.125]);
+        img.header.exposure = Some(0.0);
+        img.recover_original_radiance();
+        assert!(img.header.exposure.is_none());
+        assert!(img.pixels[0].is_finite());
+        assert!((img.pixels[0] - 0.5).abs() < 1e-6);
+        assert!((img.pixels[1] - 0.25).abs() < 1e-6);
+        assert!((img.pixels[2] - 0.125).abs() < 1e-6);
+    }
+
+    #[test]
+    fn recover_original_radiance_inverts_apply_exposure() {
+        // apply_exposure multiplies, recover_original_radiance divides.
+        // Round-trip through both should land back at the original
+        // float buffer within f32 precision.
+        let original = vec![0.7_f32, 0.5, 0.3, 0.4, 0.25, 0.15];
+        let mut img = HdrImage::new_rgb96f(2, 1, original.clone());
+        img.header.exposure = Some(0.5);
+        img.apply_exposure();
+        // After apply: header None, pixels multiplied.
+        img.header.exposure = Some(0.5);
+        img.recover_original_radiance();
+        for (i, (&a, &b)) in original.iter().zip(img.pixels.iter()).enumerate() {
+            assert!((a - b).abs() < 1e-6, "pixel {i}: {a} vs {b}");
+        }
+    }
+
+    #[test]
+    fn recover_original_radiance_undoes_stacked_exposures() {
+        // The decoder folds multiple EXPOSURE records into the running
+        // product, so a single division by that product undoes the
+        // whole stack — this matches the spec wording "divide file
+        // values by the product of all EXPOSURE settings". Stored
+        // values came from original × (0.5 × 0.25) = original × 0.125;
+        // dividing by 0.125 should recover original.
+        let mut img = HdrImage::new_rgb96f(1, 1, vec![0.125, 0.0625, 0.03125]);
+        img.header.exposure = Some(0.5 * 0.25);
+        img.recover_original_radiance();
+        assert!(img.header.exposure.is_none());
+        assert!((img.pixels[0] - 1.0).abs() < 1e-5);
+        assert!((img.pixels[1] - 0.5).abs() < 1e-5);
+        assert!((img.pixels[2] - 0.25).abs() < 1e-5);
+    }
+
+    #[test]
+    fn recover_original_colorcorr_divides_per_channel_and_clears_header() {
+        // Stored channels = original × COLORCORR. With COLORCORR=2,4,8,
+        // the stored (2.0, 4.0, 8.0) maps back to (1.0, 1.0, 1.0).
+        let mut img = HdrImage::new_rgb96f(2, 1, vec![2.0, 4.0, 8.0, 1.0, 2.0, 4.0]);
+        img.header.colorcorr = Some([2.0, 4.0, 8.0]);
+        img.recover_original_colorcorr();
+        assert!(
+            img.header.colorcorr.is_none(),
+            "colorcorr slot not cleared after recovery"
+        );
+        // Pixel 0: (2/2, 4/4, 8/8) = (1, 1, 1)
+        assert!((img.pixels[0] - 1.0).abs() < 1e-6);
+        assert!((img.pixels[1] - 1.0).abs() < 1e-6);
+        assert!((img.pixels[2] - 1.0).abs() < 1e-6);
+        // Pixel 1: (1/2, 2/4, 4/8) = (0.5, 0.5, 0.5)
+        assert!((img.pixels[3] - 0.5).abs() < 1e-6);
+        assert!((img.pixels[4] - 0.5).abs() < 1e-6);
+        assert!((img.pixels[5] - 0.5).abs() < 1e-6);
+    }
+
+    #[test]
+    fn recover_original_colorcorr_with_none_does_nothing() {
+        let mut img = HdrImage::new_rgb96f(1, 1, vec![0.7, 0.5, 0.3]);
+        assert!(img.header.colorcorr.is_none());
+        img.recover_original_colorcorr();
+        assert!((img.pixels[0] - 0.7).abs() < 1e-6);
+        assert!((img.pixels[1] - 0.5).abs() < 1e-6);
+        assert!((img.pixels[2] - 0.3).abs() < 1e-6);
+    }
+
+    #[test]
+    fn recover_original_colorcorr_unit_vector_is_a_no_op() {
+        let mut img = HdrImage::new_rgb96f(1, 1, vec![0.7, 0.5, 0.3]);
+        img.header.colorcorr = Some([1.0, 1.0, 1.0]);
+        img.recover_original_colorcorr();
+        assert!(img.header.colorcorr.is_none());
+        assert!((img.pixels[0] - 0.7).abs() < 1e-6);
+        assert!((img.pixels[1] - 0.5).abs() < 1e-6);
+        assert!((img.pixels[2] - 0.3).abs() < 1e-6);
+    }
+
+    #[test]
+    fn recover_original_colorcorr_zero_component_does_not_blow_up() {
+        // Any zero component is degenerate (division produces non-finite
+        // values). Clear the slot, leave pixels untouched.
+        let mut img = HdrImage::new_rgb96f(1, 1, vec![0.5, 0.25, 0.125]);
+        img.header.colorcorr = Some([2.0, 0.0, 4.0]);
+        img.recover_original_colorcorr();
+        assert!(img.header.colorcorr.is_none());
+        for &v in &img.pixels {
+            assert!(v.is_finite());
+        }
+        assert!((img.pixels[0] - 0.5).abs() < 1e-6);
+        assert!((img.pixels[1] - 0.25).abs() < 1e-6);
+        assert!((img.pixels[2] - 0.125).abs() < 1e-6);
+    }
+
+    #[test]
+    fn recover_original_colorcorr_inverts_apply_colorcorr() {
+        let original = vec![0.6_f32, 0.4, 0.2];
+        let mut img = HdrImage::new_rgb96f(1, 1, original.clone());
+        img.header.colorcorr = Some([2.0, 4.0, 8.0]);
+        img.apply_colorcorr();
+        // Restore the slot and recover.
+        img.header.colorcorr = Some([2.0, 4.0, 8.0]);
+        img.recover_original_colorcorr();
+        for (a, b) in original.iter().zip(img.pixels.iter()) {
+            assert!((a - b).abs() < 1e-6, "{a} vs {b}");
+        }
+    }
+
+    #[test]
     fn effective_primaries_is_idempotent_with_record_roundtrip() {
         // The default Radiance primaries must survive the on-disk
         // PRIMARIES record round-trip without drift, so a caller that
@@ -337,6 +509,100 @@ impl HdrImage {
                     px[0] *= r;
                     px[1] *= g;
                     px[2] *= b;
+                }
+            }
+        }
+    }
+
+    /// Divide each float channel by the header's cumulative `EXPOSURE`
+    /// factor to reconstruct the original scene-referred radiance, then
+    /// clear the header slot.
+    ///
+    /// The staged spec
+    /// (`docs/image/hdr/radiance-hdr-rgbe-format.md` §1 EXPOSURE row)
+    /// documents `EXPOSURE=` as a multiplier *already applied to* the
+    /// stored pixels: the on-disk channel `c_i` equals `original_i *
+    /// EXPOSURE`, and recovering the original radiance in physical units
+    /// (watts/sr/m²) is the divide-by-the-product operation the spec
+    /// describes verbatim — "to recover original radiances divide file
+    /// values by the product of all `EXPOSURE` settings". When the
+    /// header carries multiple `EXPOSURE=` records the decoder already
+    /// folds them into the running product stored in
+    /// [`HdrHeader::exposure`], so a single division by that field
+    /// undoes the entire stack.
+    ///
+    /// This is the spec-canonical recovery operation, complementary to
+    /// [`Self::apply_exposure`]: where `apply_exposure` post-multiplies
+    /// the buffer by the recorded factor (useful for re-applying an
+    /// exposure adjustment to the float samples on the way to a
+    /// display-side tone-mapper), this method removes the factor that
+    /// the writer already baked in. Pick the one that matches the
+    /// numerical contract your downstream pipeline expects.
+    ///
+    /// A `None` slot is treated as the spec-documented absence of an
+    /// `EXPOSURE=` record ("No `EXPOSURE` ⇒ none applied") and the
+    /// method is a no-op. An exact-`1.0` factor is also a no-op since
+    /// division would be the identity and the slot is cleared anyway.
+    /// A second call is a no-op (the slot is `None` after the first).
+    /// A `0.0` factor is rejected as a no-op (division would produce
+    /// non-finite values; the spec treats a literal zero exposure as a
+    /// malformed-but-permissive record). The slot is still cleared so
+    /// callers don't see the offending value on a re-encode.
+    pub fn recover_original_radiance(&mut self) {
+        if let Some(e) = self.header.exposure.take() {
+            if e == 0.0 || !e.is_finite() {
+                return;
+            }
+            if (e - 1.0).abs() > f32::EPSILON {
+                let inv = 1.0 / e;
+                for v in &mut self.pixels {
+                    *v *= inv;
+                }
+            }
+        }
+    }
+
+    /// Divide each float channel by its corresponding component of the
+    /// header's cumulative `COLORCORR` triple to reconstruct the
+    /// original per-primary radiance, then clear the header slot.
+    ///
+    /// The staged spec (`docs/image/hdr/radiance-hdr-rgbe-format.md` §1
+    /// COLORCORR row) describes the record as a per-primary multiplier
+    /// "already applied" to the stored channels, complementary to
+    /// `EXPOSURE` but tracking per-primary colour correction rather than
+    /// overall brightness. Recovering the pre-correction channels is
+    /// therefore the per-component reciprocal of [`Self::apply_colorcorr`]
+    /// — the same divide-to-undo idiom the EXPOSURE counterpart uses.
+    ///
+    /// When the header carries multiple `COLORCORR=` records the decoder
+    /// already folds them into the element-wise product stored in
+    /// [`HdrHeader::colorcorr`], so a single per-channel division undoes
+    /// the entire stack. A `None` slot, the trivial `1.0, 1.0, 1.0`
+    /// triple, and any component that is `0.0` or non-finite are all
+    /// treated as no-ops (the spec considers a zero per-channel
+    /// correction degenerate; division would produce non-finite values).
+    /// The slot is still cleared so callers don't see the offending
+    /// values on a re-encode. A second call is a no-op.
+    pub fn recover_original_colorcorr(&mut self) {
+        if let Some([r, g, b]) = self.header.colorcorr.take() {
+            if r == 0.0
+                || g == 0.0
+                || b == 0.0
+                || !r.is_finite()
+                || !g.is_finite()
+                || !b.is_finite()
+            {
+                return;
+            }
+            if (r - 1.0).abs() > f32::EPSILON
+                || (g - 1.0).abs() > f32::EPSILON
+                || (b - 1.0).abs() > f32::EPSILON
+            {
+                let (ir, ig, ib) = (1.0 / r, 1.0 / g, 1.0 / b);
+                for px in self.pixels.chunks_exact_mut(3) {
+                    px[0] *= ir;
+                    px[1] *= ig;
+                    px[2] *= ib;
                 }
             }
         }

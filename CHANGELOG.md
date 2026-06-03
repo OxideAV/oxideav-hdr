@@ -9,6 +9,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Round 220 (spec-compliance — original-radiance recovery): two new
+  `HdrImage` helpers, `recover_original_radiance` and
+  `recover_original_colorcorr`, that divide the float buffer by the
+  cumulative `EXPOSURE=` / `COLORCORR=` factors stored in
+  `HdrHeader` and clear the slots. The staged spec
+  (`docs/image/hdr/radiance-hdr-rgbe-format.md` §1 EXPOSURE /
+  COLORCORR rows) defines both records as multipliers "already
+  applied" to the pixels at write time — the stored channel
+  `c = original * EXPOSURE * COLORCORR_i`. Recovering the
+  scene-referred radiance is therefore the divide-by-the-product
+  operation the spec describes verbatim ("to recover original
+  radiances divide file values by the product of all EXPOSURE
+  settings"). The existing `apply_exposure` / `apply_colorcorr`
+  helpers post-multiply by the recorded factor (the renderer-side
+  adjustment idiom); the new helpers are their spec-canonical
+  inverse, so consumers that need true scene-referred radiance for
+  downstream radiometric work no longer have to reach into
+  `HdrHeader::exposure` / `colorcorr` and roll the divide
+  themselves. Degenerate edge cases (`None` slot, `0.0`, non-finite
+  factors, the trivial `1.0` / `[1.0, 1.0, 1.0]` no-op) are handled
+  explicitly — the slot is cleared but the pixel buffer is never
+  written with `NaN` / `inf`. Eleven new unit tests pin the
+  divide-and-clear contract, the no-op edge cases, the
+  inverse-of-`apply_*` round-trip, and the stacked-records case
+  where the decoder folds multiple `EXPOSURE=` records into a single
+  running product (a single divide by that product undoes the whole
+  stack). The existing `apply_*` semantics, the round-192 fixture
+  regression tests, and the standalone (`default-features = false`)
+  build path are all unchanged — the helpers are purely additive.
+
 - Round 214 (spec-compliance — `PRIMARIES` reference-manual default):
   new `HdrImage::effective_primaries()` helper, mirroring the round-208
   `effective_pixaspect` convenience. Per the staged spec
