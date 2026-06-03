@@ -10,7 +10,7 @@
 //! float dynamic range stays available to native callers and the LDR
 //! framework path stays simple.
 
-use crate::header::HdrHeader;
+use crate::header::{HdrHeader, Primaries};
 
 #[cfg(test)]
 mod tests {
@@ -120,6 +120,59 @@ mod tests {
         assert!((img.pixels[0] - 0.7).abs() < 1e-6);
         assert!((img.pixels[1] - 0.5).abs() < 1e-6);
         assert!((img.pixels[2] - 0.3).abs() < 1e-6);
+    }
+
+    #[test]
+    fn effective_primaries_defaults_to_radiance_when_absent() {
+        // No PRIMARIES record → reference-manual default: Greg Ward's
+        // original Radiance primaries with an equal-energy white
+        // (`0.640 0.330 0.290 0.600 0.150 0.060 0.333 0.333`).
+        let img = HdrImage::new_rgb96f(1, 1, vec![0.0, 0.0, 0.0]);
+        assert!(img.header.primaries.is_none());
+        let p = img.effective_primaries();
+        assert!((p.red.0 - 0.640).abs() < 1e-5);
+        assert!((p.red.1 - 0.330).abs() < 1e-5);
+        assert!((p.green.0 - 0.290).abs() < 1e-5);
+        assert!((p.green.1 - 0.600).abs() < 1e-5);
+        assert!((p.blue.0 - 0.150).abs() < 1e-5);
+        assert!((p.blue.1 - 0.060).abs() < 1e-5);
+        // Equal-energy white: x = y = 1/3.
+        assert!((p.white.0 - 1.0 / 3.0).abs() < 1e-5);
+        assert!((p.white.1 - 1.0 / 3.0).abs() < 1e-5);
+        // Exact match against the `Primaries::RADIANCE` constant: the
+        // helper is a substitution, not a reconstruction.
+        assert_eq!(p, Primaries::RADIANCE);
+    }
+
+    #[test]
+    fn effective_primaries_returns_header_value_when_set() {
+        // When the file declared a PRIMARIES record the helper must
+        // return that value verbatim, NOT the reference-manual default.
+        let mut img = HdrImage::new_rgb96f(1, 1, vec![0.0, 0.0, 0.0]);
+        img.header.primaries = Some(Primaries::SRGB);
+        let p = img.effective_primaries();
+        assert_eq!(p, Primaries::SRGB);
+        // Pin the sRGB-specific value (D65 white at 0.3127, 0.3290)
+        // so a future swap of the constants is caught by this test.
+        assert!((p.white.0 - 0.3127).abs() < 1e-5);
+        assert!((p.white.1 - 0.3290).abs() < 1e-5);
+    }
+
+    #[test]
+    fn effective_primaries_is_idempotent_with_record_roundtrip() {
+        // The default Radiance primaries must survive the on-disk
+        // PRIMARIES record round-trip without drift, so a caller that
+        // re-encodes with `header.primaries = Some(effective)` and
+        // re-decodes recovers the same chromaticities.
+        let img = HdrImage::new_rgb96f(1, 1, vec![0.0, 0.0, 0.0]);
+        let p = img.effective_primaries();
+        let s = p.to_record_string();
+        let back = Primaries::from_record_str(&s).expect("PRIMARIES round-trip parse");
+        assert!((back.red.0 - p.red.0).abs() < 1e-5);
+        assert!((back.green.0 - p.green.0).abs() < 1e-5);
+        assert!((back.blue.0 - p.blue.0).abs() < 1e-5);
+        assert!((back.white.0 - p.white.0).abs() < 1e-5);
+        assert!((back.white.1 - p.white.1).abs() < 1e-5);
     }
 }
 
@@ -236,6 +289,31 @@ impl HdrImage {
     /// any extra arithmetic.
     pub fn effective_pixaspect(&self) -> f32 {
         self.header.pixaspect.unwrap_or(1.0)
+    }
+
+    /// CIE chromaticity coordinates of the three RGB primaries and the
+    /// reference white the picture should be interpreted against, with
+    /// the Radiance reference-manual default applied when no
+    /// `PRIMARIES=` record was present.
+    ///
+    /// Per the staged spec (`docs/image/hdr/radiance-hdr-rgbe-format.md`
+    /// §1 PRIMARIES row), when a Radiance picture omits `PRIMARIES=` the
+    /// consumer is expected to assume Greg Ward's original Radiance
+    /// primaries with an equal-energy reference white —
+    /// `0.640 0.330 0.290 0.600 0.150 0.060 0.333 0.333` (R, G, B, W).
+    /// Those are the values [`Primaries::RADIANCE`] holds (the white
+    /// point exact at `(1/3, 1/3)` so the round-trip through
+    /// [`Primaries::from_record_str`] / [`Primaries::to_record_string`]
+    /// is non-lossy at f32 precision).
+    ///
+    /// Mirrors [`Self::effective_pixaspect`] in shape: callers that need
+    /// "what the file said, or the spec default" can take this in one
+    /// call without re-implementing the fallback. Consumers that need to
+    /// distinguish "file declared default-equal primaries explicitly"
+    /// from "no record was present" should match on
+    /// [`HdrHeader::primaries`] directly.
+    pub fn effective_primaries(&self) -> Primaries {
+        self.header.primaries.unwrap_or(Primaries::RADIANCE)
     }
 
     /// Apply the header's `COLORCORR` per-channel multiplier to every

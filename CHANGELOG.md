@@ -9,6 +9,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Round 214 (spec-compliance — `PRIMARIES` reference-manual default):
+  new `HdrImage::effective_primaries()` helper, mirroring the round-208
+  `effective_pixaspect` convenience. Per the staged spec
+  (`docs/image/hdr/radiance-hdr-rgbe-format.md` §1 PRIMARIES row), when
+  a Radiance picture omits the `PRIMARIES=` record, consumers are
+  expected to assume Greg Ward's original Radiance primaries with an
+  equal-energy reference white (`0.640 0.330 0.290 0.600 0.150 0.060
+  1/3 1/3` for R, G, B, W). Through round 213 the decoder left
+  `header.primaries = None` for files without the record and consumers
+  had to know to substitute `Primaries::RADIANCE` themselves; the new
+  helper does the substitution in one call (returning the literal
+  `Primaries::RADIANCE` constant when the slot is `None`) without
+  perturbing `HdrHeader::primaries`, so callers that need to
+  distinguish "file declared default-equal primaries explicitly" from
+  "no record was present" can still match on the typed slot directly.
+  Three new image-module tests pin the default-when-absent branch
+  (including a numeric check against the staged spec's literal value
+  table), the header-value-when-set branch (sRGB), and the
+  `PRIMARIES=` record round-trip through `Primaries::to_record_string`
+  / `Primaries::from_record_str`. The existing fixtures and the
+  round-192 regression tests pass unchanged — the helper is purely
+  additive.
+
 - Round 208 (spec-compliance — cumulative `PIXASPECT`): closed the
   last "multiple records stack" gap from the Radiance reference
   manual. The reference manual lists `PIXASPECT=` alongside

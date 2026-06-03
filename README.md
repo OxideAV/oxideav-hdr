@@ -17,7 +17,7 @@ Clean-room implementation against the published format documentation
 Radiance source / `image` crate's `hdr` submodule / Greg Ward's
 reference C code consulted.
 
-## Coverage (round 208)
+## Coverage (round 214)
 
 | Feature                      | Read | Write |
 |------------------------------|:----:|:-----:|
@@ -29,6 +29,7 @@ reference C code consulted.
 | `COLORCORR` (3-float)        |  Y   |   Y   |
 | `HdrImage::effective_pixaspect` (header value or reference-manual default `1.0`) | helper | n/a |
 | `PRIMARIES` (8-float chromaticity) | Y |   Y   |
+| `HdrImage::effective_primaries` (header value or reference-manual default `0.640 0.330 0.290 0.600 0.150 0.060 1/3 1/3` — Greg Ward's original Radiance primaries with equal-energy white) | helper | n/a |
 | All 8 axis-flag combinations |  Y   |  Y (Y-first + X-first transpose) |
 | 32-bit_rle_rgbe pixels       |  Y   |   Y   |
 | 32-bit_rle_xyze pixels       |  Y   |   Y (with helpers in `xyz`) |
