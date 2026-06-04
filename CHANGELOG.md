@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.0.4](https://github.com/OxideAV/oxideav-hdr/compare/v0.0.3...v0.0.4) - 2026-06-04
+
+### Other
+
+- round 231 — wide-gamut image-level XYZE↔RGB converters
+- round 226 — chromaticity-derived RGB ↔ XYZ matrices from Primaries
+- round 220 — spec-canonical original-radiance / colorcorr recovery
+- round 214 — PRIMARIES reference-manual default helper
+- round 208 — cumulative PIXASPECT + effective_pixaspect helper
+- round 202 — HdrLimits resource guard + cargo-fuzz harness
+
 ### Added
 
 - Round 231 (spec-compliance — wide-gamut image-level XYZE↔RGB
