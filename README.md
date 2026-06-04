@@ -13,7 +13,7 @@ takes the same shape and emits a complete file with the canonical
 `-Y H +X W` axis flags.
 
 Clean-room implementation against the published format documentation
-(*Real Pixels*, the `radsite.lbl.gov` Radiance Reference Manual). No
+(the published format documentation). No
 Radiance source / `image` crate's `hdr` submodule / Greg Ward's
 reference C code consulted.
 
