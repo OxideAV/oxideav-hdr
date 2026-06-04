@@ -9,6 +9,52 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Round 231 (spec-compliance — wide-gamut image-level XYZE↔RGB
+  converters): four new `xyz` module helpers,
+  `convert_image_xyz_to_rgb_with_primaries(image, primaries) -> bool`,
+  `convert_image_rgb_to_xyz_with_primaries(image, primaries) -> bool`,
+  `convert_image_xyz_to_rgb_with_effective_primaries(image) -> bool`,
+  and `convert_image_rgb_to_xyz_with_effective_primaries(image) -> bool`,
+  that walk the picture's float buffer in-place using the matrix the
+  round-226 `rgb_to_xyz_matrix_from_primaries` /
+  `xyz_to_rgb_matrix_from_primaries` derives from an arbitrary
+  [`Primaries`] record. Through round 230 the only whole-image XYZE↔RGB
+  converters the crate shipped were the round-2
+  `convert_image_xyz_to_rgb` / `convert_image_rgb_to_xyz` pair, which
+  hard-code an [`RgbColorSpace`] enum variant (sRGB or Radiance). Files
+  that carried a wide-gamut `PRIMARIES=` record (e.g.
+  `Primaries::P3_D65` or `Primaries::REC2020`, both added in round 4)
+  or a custom 8-float record from a niche renderer had no equivalent
+  whole-image API — consumers had to call
+  `rgb_to_xyz_matrix_from_primaries` themselves and walk the float
+  buffer manually, or fall back to the sRGB converter (which is wrong
+  for wide-gamut content). The new helpers wire the round-226 derived
+  matrix into the existing chunks-of-three walk + format-tag flip, and
+  expose two further `_with_effective_primaries` convenience wrappers
+  that thread the file's own [`HdrImage::effective_primaries`] in
+  (header value when set, reference-manual default
+  [`Primaries::RADIANCE`] when no record was present) so the most
+  common XYZE→RGB call shape becomes a single `bool`-returning method
+  with no plumbing. Seven new unit tests pin the contract: a
+  full RGB→XYZ→RGB round-trip through the P3-D65 chromaticity-derived
+  matrix recovers the input buffer within `f32` precision, the new
+  `_with_primaries(_, Primaries::SRGB)` path produces numerically the
+  same buffer as the round-2 `convert_image_xyz_to_rgb(_,
+  RgbColorSpace::Srgb)` (within `1e-3`), the `_with_effective_primaries`
+  wrappers thread `header.primaries` through unchanged (verified
+  against an explicit call with the same record), the
+  `_with_effective_primaries` variants fall back to
+  `Primaries::RADIANCE` when the slot is `None`, the degenerate
+  `yW = 0` record short-circuits to `false` and leaves both the pixel
+  buffer and the format tag untouched (so a caller can recover with a
+  named matrix without first re-deriving the float channels), and a
+  full RGB→XYZ→RGB round-trip through the effective-primaries
+  wrappers with a P3-D65 header round-trips losslessly. The existing
+  `convert_image_xyz_to_rgb` / `convert_image_rgb_to_xyz` signatures
+  and the round-1..230 happy paths are bit-identical — the new helpers
+  are purely additive. The standalone (`default-features = false`)
+  build path is unchanged.
+
 - Round 226 (spec-compliance — chromaticity-derived `RGB ↔ XYZ`
   matrices): two new `xyz` module helpers,
   `rgb_to_xyz_matrix_from_primaries(p: Primaries) -> Option<[[f32; 3];

@@ -17,7 +17,7 @@ Clean-room implementation against the published format documentation
 Radiance source / `image` crate's `hdr` submodule / Greg Ward's
 reference C code consulted.
 
-## Coverage (round 226)
+## Coverage (round 231)
 
 | Feature                      | Read | Write |
 |------------------------------|:----:|:-----:|
@@ -45,6 +45,7 @@ reference C code consulted.
 | `HdrImage::recover_original_colorcorr` (per-channel reciprocal of `apply_colorcorr` — reconstructs pre-correction radiance for files that carry `COLORCORR=`) | decode helper | n/a |
 | XYZE ↔ RGB (sRGB / Radiance) |  -   | helpers |
 | `rgb_to_xyz_matrix_from_primaries` / `xyz_to_rgb_matrix_from_primaries` (derive a linear `RGB ↔ XYZ` matrix from any `Primaries` record's eight CIE xy floats per BT.709 §3 / IEC 61966-2-1 Annex C — works for `P3_D65`, `REC2020`, and arbitrary 8-float `PRIMARIES=` records the named `RgbColorSpace` enum doesn't cover) | n/a | helpers |
+| `convert_image_xyz_to_rgb_with_primaries` / `convert_image_rgb_to_xyz_with_primaries` + `_with_effective_primaries` wide-gamut whole-image converters (in-place; pick the chromaticity record explicitly or thread the file's own `PRIMARIES=` via `effective_primaries`; return `bool` and leave the buffer / format tag untouched on degenerate input) | helpers | helpers |
 | `Primaries::SRGB` / `RADIANCE` / `P3_D65` / `REC2020` constants | n/a | constants |
 | Tone-mapping (Linear / Gamma / Reinhard / ReinhardExtended / ReinhardLuminance / Hable / Drago / ACES) | - | helpers |
 | Radiance photometric luminance (`179 * (0.265 R + 0.670 G + 0.065 B)` for RGBE; `179 * Y` for XYZE) | helper (`luminance_lm_per_sr_per_m2`, `HdrImage::luminance_buffer`) | n/a |

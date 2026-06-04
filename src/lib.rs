@@ -64,9 +64,12 @@ pub use rgbe::{rgb_to_rgbe, rgbe_to_rgb};
 pub use rle::FallbackMode;
 pub use tonemap::{tone_map, ToneMap};
 pub use xyz::{
-    convert_image_rgb_to_xyz, convert_image_xyz_to_rgb, luminance_lm_per_sr_per_m2, rgb_to_xyz,
-    rgb_to_xyz_matrix, rgb_to_xyz_matrix_from_primaries, xyz_to_rgb, xyz_to_rgb_matrix,
-    xyz_to_rgb_matrix_from_primaries, RgbColorSpace, RGBE_BRIGHT_COEFFS, WHTEFFICACY,
+    convert_image_rgb_to_xyz, convert_image_rgb_to_xyz_with_effective_primaries,
+    convert_image_rgb_to_xyz_with_primaries, convert_image_xyz_to_rgb,
+    convert_image_xyz_to_rgb_with_effective_primaries, convert_image_xyz_to_rgb_with_primaries,
+    luminance_lm_per_sr_per_m2, rgb_to_xyz, rgb_to_xyz_matrix, rgb_to_xyz_matrix_from_primaries,
+    xyz_to_rgb, xyz_to_rgb_matrix, xyz_to_rgb_matrix_from_primaries, RgbColorSpace,
+    RGBE_BRIGHT_COEFFS, WHTEFFICACY,
 };
 
 #[cfg(feature = "registry")]

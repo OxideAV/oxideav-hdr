@@ -153,6 +153,100 @@ pub fn convert_image_rgb_to_xyz(image: &mut crate::HdrImage, space: RgbColorSpac
     image.header.format = crate::HdrFormat::Xyze;
 }
 
+/// Convert the float channels carried by `image` from CIE XYZ into
+/// linear RGB using the matrix derived from an arbitrary
+/// [`crate::Primaries`] record.
+///
+/// The wide-gamut counterpart to [`convert_image_xyz_to_rgb`]. The
+/// caller picks the chromaticity record; the matrix is derived in-crate
+/// via [`xyz_to_rgb_matrix_from_primaries`] (BT.709 §3 /
+/// IEC 61966-2-1 Annex C construction). Use this when the decoded
+/// image's `header.format` is [`crate::HdrFormat::Xyze`] and the
+/// downstream RGB consumer targets a wide-gamut space the named
+/// [`RgbColorSpace`] enum doesn't cover (e.g. Display P3, BT.2020, or
+/// a custom 8-float `PRIMARIES=` record from a niche renderer).
+///
+/// Returns `true` when the conversion ran (matrix derivation
+/// succeeded and the buffer was rewritten + the format tag flipped to
+/// [`crate::HdrFormat::Rgbe`]) and `false` when the supplied primaries
+/// are degenerate (any zero `y` chromaticity, singular unscaled
+/// matrix). On the degenerate branch the pixel buffer and format tag
+/// are left untouched so the caller can fall back to a named matrix
+/// (e.g. [`convert_image_xyz_to_rgb`] with [`RgbColorSpace::Srgb`])
+/// without first re-deriving the float channels themselves.
+pub fn convert_image_xyz_to_rgb_with_primaries(
+    image: &mut crate::HdrImage,
+    primaries: crate::Primaries,
+) -> bool {
+    let m = match xyz_to_rgb_matrix_from_primaries(primaries) {
+        Some(m) => m,
+        None => return false,
+    };
+    for px in image.pixels.chunks_exact_mut(3) {
+        let v = apply_matrix(m, [px[0], px[1], px[2]]);
+        px[0] = v[0];
+        px[1] = v[1];
+        px[2] = v[2];
+    }
+    image.header.format = crate::HdrFormat::Rgbe;
+    true
+}
+
+/// Inverse of [`convert_image_xyz_to_rgb_with_primaries`]: convert
+/// linear RGB to CIE XYZ in-place using the matrix derived from an
+/// arbitrary [`crate::Primaries`] record, then flip the header tag to
+/// [`crate::HdrFormat::Xyze`].
+///
+/// Returns `true` on a successful conversion and `false` on a
+/// degenerate primaries record (same semantics as the inverse helper).
+/// On the degenerate branch the pixel buffer and format tag are left
+/// untouched.
+pub fn convert_image_rgb_to_xyz_with_primaries(
+    image: &mut crate::HdrImage,
+    primaries: crate::Primaries,
+) -> bool {
+    let m = match rgb_to_xyz_matrix_from_primaries(primaries) {
+        Some(m) => m,
+        None => return false,
+    };
+    for px in image.pixels.chunks_exact_mut(3) {
+        let v = apply_matrix(m, [px[0], px[1], px[2]]);
+        px[0] = v[0];
+        px[1] = v[1];
+        px[2] = v[2];
+    }
+    image.header.format = crate::HdrFormat::Xyze;
+    true
+}
+
+/// Convert the float channels of `image` from CIE XYZ into linear RGB
+/// using the picture's own [`crate::HdrImage::effective_primaries`].
+///
+/// Convenience wrapper that picks the chromaticity record the file
+/// declared via `PRIMARIES=` (or the reference-manual default
+/// [`crate::Primaries::RADIANCE`] when no record was present) and
+/// defers to [`convert_image_xyz_to_rgb_with_primaries`]. The single
+/// most common XYZE→RGB call shape for a freshly-decoded picture: the
+/// caller doesn't have to plumb the primaries through manually.
+///
+/// Returns `true` on success, `false` if the file's effective
+/// primaries are degenerate (a hand-edited `PRIMARIES=` with a zero `y`
+/// chromaticity; the reference-manual default never triggers this).
+pub fn convert_image_xyz_to_rgb_with_effective_primaries(image: &mut crate::HdrImage) -> bool {
+    let p = image.effective_primaries();
+    convert_image_xyz_to_rgb_with_primaries(image, p)
+}
+
+/// Convert the float channels of `image` from linear RGB into CIE
+/// XYZ using the picture's own [`crate::HdrImage::effective_primaries`].
+///
+/// Inverse of [`convert_image_xyz_to_rgb_with_effective_primaries`];
+/// same `Option`-shaped return for degenerate primaries.
+pub fn convert_image_rgb_to_xyz_with_effective_primaries(image: &mut crate::HdrImage) -> bool {
+    let p = image.effective_primaries();
+    convert_image_rgb_to_xyz_with_primaries(image, p)
+}
+
 /// Radiance's standard luminous efficacy of equal-energy white,
 /// `WHTEFFICACY` in `src/common/color.h`. The constant that turns
 /// reference-encoder watts/sr/m² into lumens/sr/m².
@@ -621,5 +715,163 @@ mod tests {
             "Z for Rec.2020: {} (expected 1.0890)",
             xyz[2]
         );
+    }
+
+    #[test]
+    fn convert_image_with_primaries_round_trips_via_inverse() {
+        // Take an RGB image, convert RGB → XYZ → RGB through the
+        // chromaticity-derived matrices; the float buffer must land back
+        // at the input within f32 precision. Tests both the
+        // _with_primaries call shape and the inverse-pair invariant for
+        // a wide-gamut record the named `RgbColorSpace` enum doesn't
+        // cover (P3-D65 here, exercising the round-226 derivation).
+        use crate::HdrImage;
+        let original = vec![0.5_f32, 0.25, 0.10, 0.7, 0.6, 0.5, 0.1, 0.9, 0.3];
+        let mut img = HdrImage::new_rgb96f(3, 1, original.clone());
+        // RGB → XYZ via P3-D65.
+        assert!(convert_image_rgb_to_xyz_with_primaries(
+            &mut img,
+            crate::Primaries::P3_D65
+        ));
+        assert_eq!(img.header.format, crate::HdrFormat::Xyze);
+        // XYZ → RGB via the same record.
+        assert!(convert_image_xyz_to_rgb_with_primaries(
+            &mut img,
+            crate::Primaries::P3_D65
+        ));
+        assert_eq!(img.header.format, crate::HdrFormat::Rgbe);
+        for (i, (got, want)) in img.pixels.iter().zip(original.iter()).enumerate() {
+            assert!(
+                (got - want).abs() < 1e-4,
+                "round-trip pixel {i}: {want} vs {got}"
+            );
+        }
+    }
+
+    #[test]
+    fn convert_image_with_primaries_for_srgb_matches_named_helper() {
+        // The chromaticity-derived helper applied with `Primaries::SRGB`
+        // must produce numerically the same pixel buffer as the named
+        // `convert_image_xyz_to_rgb(_, RgbColorSpace::Srgb)`. Their
+        // matrices are algebraically the same derivation; this pins the
+        // two paths together so a future tweak to the named matrix
+        // updates both or trips this test.
+        use crate::HdrImage;
+        let xyz_buf = vec![0.4_f32, 0.3, 0.2, 0.7, 0.6, 0.5];
+        let mut a = HdrImage::new_rgb96f(2, 1, xyz_buf.clone());
+        a.header.format = crate::HdrFormat::Xyze;
+        let mut b = HdrImage::new_rgb96f(2, 1, xyz_buf);
+        b.header.format = crate::HdrFormat::Xyze;
+        convert_image_xyz_to_rgb(&mut a, RgbColorSpace::Srgb);
+        assert!(convert_image_xyz_to_rgb_with_primaries(
+            &mut b,
+            crate::Primaries::SRGB
+        ));
+        for (i, (av, bv)) in a.pixels.iter().zip(b.pixels.iter()).enumerate() {
+            assert!((av - bv).abs() < 1e-3, "ch {i}: named={av} derived={bv}");
+        }
+        // Both helpers flip the tag the same way.
+        assert_eq!(a.header.format, b.header.format);
+    }
+
+    #[test]
+    fn convert_image_with_primaries_rejects_degenerate_record() {
+        // A `yW = 0` chromaticity is the same degenerate shape the matrix
+        // helpers reject with `None`. The image-level wrappers should
+        // surface that as `false` and leave the buffer + format tag
+        // untouched so the caller can fall back to a known-good
+        // conversion.
+        use crate::HdrImage;
+        let original = vec![0.5_f32, 0.25, 0.10];
+        let mut img = HdrImage::new_rgb96f(1, 1, original.clone());
+        let original_format = img.header.format;
+        let bad = crate::Primaries {
+            red: (0.640, 0.330),
+            green: (0.290, 0.600),
+            blue: (0.150, 0.060),
+            white: (0.5, 0.0),
+        };
+        assert!(!convert_image_xyz_to_rgb_with_primaries(&mut img, bad));
+        assert_eq!(img.pixels, original, "pixels mutated on degenerate path");
+        assert_eq!(
+            img.header.format, original_format,
+            "format tag flipped on degenerate path"
+        );
+        assert!(!convert_image_rgb_to_xyz_with_primaries(&mut img, bad));
+        assert_eq!(img.pixels, original);
+        assert_eq!(img.header.format, original_format);
+    }
+
+    #[test]
+    fn convert_image_with_effective_primaries_uses_header_value() {
+        // The convenience wrapper must thread the file's declared
+        // `PRIMARIES=` record through to the underlying conversion.
+        // Compare against an explicit call with the same primaries.
+        use crate::HdrImage;
+        let xyz_buf = vec![0.4_f32, 0.3, 0.2, 0.5, 0.4, 0.3];
+        let mut a = HdrImage::new_rgb96f(2, 1, xyz_buf.clone());
+        a.header.format = crate::HdrFormat::Xyze;
+        a.header.primaries = Some(crate::Primaries::REC2020);
+        let mut b = HdrImage::new_rgb96f(2, 1, xyz_buf);
+        b.header.format = crate::HdrFormat::Xyze;
+        b.header.primaries = Some(crate::Primaries::REC2020);
+        assert!(convert_image_xyz_to_rgb_with_effective_primaries(&mut a));
+        assert!(convert_image_xyz_to_rgb_with_primaries(
+            &mut b,
+            crate::Primaries::REC2020
+        ));
+        for (i, (av, bv)) in a.pixels.iter().zip(b.pixels.iter()).enumerate() {
+            assert!(
+                (av - bv).abs() < 1e-5,
+                "ch {i}: effective={av} explicit={bv}"
+            );
+        }
+    }
+
+    #[test]
+    fn convert_image_with_effective_primaries_falls_back_to_radiance_default() {
+        // When no `PRIMARIES=` record is present the effective primaries
+        // are the reference-manual default (`Primaries::RADIANCE`).
+        // Compare against an explicit call with that constant.
+        use crate::HdrImage;
+        let xyz_buf = vec![0.4_f32, 0.3, 0.2];
+        let mut a = HdrImage::new_rgb96f(1, 1, xyz_buf.clone());
+        a.header.format = crate::HdrFormat::Xyze;
+        // Leave a.header.primaries = None.
+        let mut b = HdrImage::new_rgb96f(1, 1, xyz_buf);
+        b.header.format = crate::HdrFormat::Xyze;
+        assert!(a.header.primaries.is_none());
+        assert!(convert_image_xyz_to_rgb_with_effective_primaries(&mut a));
+        assert!(convert_image_xyz_to_rgb_with_primaries(
+            &mut b,
+            crate::Primaries::RADIANCE
+        ));
+        for (i, (av, bv)) in a.pixels.iter().zip(b.pixels.iter()).enumerate() {
+            assert!(
+                (av - bv).abs() < 1e-5,
+                "ch {i}: effective(default)={av} explicit={bv}"
+            );
+        }
+    }
+
+    #[test]
+    fn convert_image_with_effective_primaries_round_trips_p3_d65() {
+        // Full RGB → XYZ → RGB cycle using the file's declared P3-D65
+        // primaries on both legs. Pins the inverse-pair invariant on
+        // the effective-primaries wrappers.
+        use crate::HdrImage;
+        let original = vec![0.55_f32, 0.35, 0.20, 0.10, 0.80, 0.45];
+        let mut img = HdrImage::new_rgb96f(2, 1, original.clone());
+        img.header.primaries = Some(crate::Primaries::P3_D65);
+        assert!(convert_image_rgb_to_xyz_with_effective_primaries(&mut img));
+        assert_eq!(img.header.format, crate::HdrFormat::Xyze);
+        assert!(convert_image_xyz_to_rgb_with_effective_primaries(&mut img));
+        assert_eq!(img.header.format, crate::HdrFormat::Rgbe);
+        for (i, (got, want)) in img.pixels.iter().zip(original.iter()).enumerate() {
+            assert!(
+                (got - want).abs() < 1e-4,
+                "round-trip pixel {i}: {want} vs {got}"
+            );
+        }
     }
 }
