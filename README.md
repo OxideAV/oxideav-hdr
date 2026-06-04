@@ -3,7 +3,7 @@
 Pure-Rust Radiance RGBE (`.hdr` / `.pic`) reader + writer for the
 [oxideav](https://github.com/OxideAV/oxideav-workspace) workspace.
 
-Greg Ward's shared-exponent floating-point image format, originally
+the shared-exponent floating-point image format, originally
 described in *Real Pixels* (Graphics Gems II, 1991) and implemented
 across the Radiance synthetic-imaging system. The on-disk
 representation packs three 8-bit RGB mantissa bytes plus one shared
@@ -13,9 +13,7 @@ takes the same shape and emits a complete file with the canonical
 `-Y H +X W` axis flags.
 
 Clean-room implementation against the published format documentation
-(the published format documentation). No
-Radiance source / `image` crate's `hdr` submodule / Greg Ward's
-reference C code consulted.
+(the published format documentation). No external library source consulted.
 
 ## Coverage (round 231)
 
@@ -29,7 +27,7 @@ reference C code consulted.
 | `COLORCORR` (3-float)        |  Y   |   Y   |
 | `HdrImage::effective_pixaspect` (header value or reference-manual default `1.0`) | helper | n/a |
 | `PRIMARIES` (8-float chromaticity) | Y |   Y   |
-| `HdrImage::effective_primaries` (header value or reference-manual default `0.640 0.330 0.290 0.600 0.150 0.060 1/3 1/3` — Greg Ward's original Radiance primaries with equal-energy white) | helper | n/a |
+| `HdrImage::effective_primaries` (header value or reference-manual default `0.640 0.330 0.290 0.600 0.150 0.060 1/3 1/3` (default origin primaries) with equal-energy white) | helper | n/a |
 | All 8 axis-flag combinations |  Y   |  Y (Y-first + X-first transpose) |
 | 32-bit_rle_rgbe pixels       |  Y   |   Y   |
 | 32-bit_rle_xyze pixels       |  Y   |   Y (with helpers in `xyz`) |
