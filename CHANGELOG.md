@@ -9,6 +9,39 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Round 248 (spec-compliance — `MagicLine` encoder option for the legacy
+  `#?RGBE` identifier): new public `MagicLine` enum
+  (`Radiance` / `Rgbe`) and a matching maximum-control entry point
+  `encode_hdr_with_full_options(image, rle, line_ending, magic)`. The
+  staged spec at `docs/image/hdr/radiance-hdr-rgbe-format.md` §1
+  documents `#?RADIANCE` and `#?RGBE` as equivalent identifier lines
+  ("some files / writers use the equivalent `#?RGBE`"). The decoder has
+  accepted both spellings since round 1 (`parse_header` checks both
+  literals); through round 247 the encoder hard-coded the `#?RADIANCE`
+  spelling on every write path, so a caller round-tripping a file whose
+  original magic was `#?RGBE` couldn't reproduce the original byte
+  sequence and a downstream consumer that only recognises the legacy
+  identifier couldn't be fed an oxideav-hdr-produced file. The new
+  entry point lets the caller pick which spelling to emit; the
+  `MagicLine::Radiance` branch is byte-identical to the existing
+  `encode_hdr_with_options` output (a regression test pins this), and
+  the `MagicLine::Rgbe` branch differs from the `Radiance` output only
+  in the four extra bytes the `RADIANCE` spelling carries. The
+  `encode_hdr` / `encode_hdr_with_rle` / `encode_hdr_with_options`
+  signatures and the round-1..247 happy path are bit-identical — the
+  helper is purely additive. Five new unit tests pin the contract:
+  every existing entry point still emits `#?RADIANCE\n` (or
+  `#?RADIANCE\r\n` under CRLF), the `MagicLine::Radiance` branch of the
+  full-options entry point reproduces the `encode_hdr_with_options`
+  output byte-for-byte, the `MagicLine::Rgbe` branch produces a file
+  with the legacy identifier whose remaining bytes are identical to the
+  `MagicLine::Radiance` output (length differs by exactly the four-byte
+  spelling delta), `MagicLine::Rgbe` honours `LineEnding::Crlf` (the
+  identifier ends in `\r\n` matching the rest of the text section), and
+  every typed `KEY=VALUE` slot still round-trips through the decoder
+  when the legacy magic is in play. The standalone
+  (`default-features = false`) build path is unchanged.
+
 - Round 231 (spec-compliance — wide-gamut image-level XYZE↔RGB
   converters): four new `xyz` module helpers,
   `convert_image_xyz_to_rgb_with_primaries(image, primaries) -> bool`,

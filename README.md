@@ -15,11 +15,11 @@ takes the same shape and emits a complete file with the canonical
 Clean-room implementation against the published format documentation
 (the published format documentation). No external library source consulted.
 
-## Coverage (round 231)
+## Coverage (round 248)
 
 | Feature                      | Read | Write |
 |------------------------------|:----:|:-----:|
-| `#?RADIANCE` / `#?RGBE` magic|  Y   |   Y   |
+| `#?RADIANCE` / `#?RGBE` magic|  Y   |   Y (default `#?RADIANCE`; `encode_hdr_with_full_options(_, _, _, MagicLine::Rgbe)` for the legacy spelling) |
 | `KEY=VALUE` header records   |  Y   |   Y   |
 | `EXPOSURE` / `GAMMA` / `PIXASPECT` / `SOFTWARE` | Y | Y |
 | `VIEW=` renderer view-parameter record | Y | Y |

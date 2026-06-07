@@ -55,6 +55,40 @@ impl LineEnding {
     }
 }
 
+/// Choice of identifier line emitted at the very top of the file.
+///
+/// The staged spec at `docs/image/hdr/radiance-hdr-rgbe-format.md`
+/// documents the two literal magic strings as equivalent:
+///
+/// > "The header begins with the identifier line `#?RADIANCE` (some
+/// > files / writers use the equivalent `#?RGBE`)"
+///
+/// The decoder ([`crate::parse_hdr`]) has accepted both magic lines
+/// since round 1. The encoder defaults to [`MagicLine::Radiance`] for
+/// the canonical wire image; [`MagicLine::Rgbe`] is the legacy form
+/// some pre-`#?RADIANCE` writers used and is useful when round-tripping
+/// a file whose original magic line was the alternate spelling, or when
+/// targeting a consumer that only recognises the older identifier.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MagicLine {
+    /// `#?RADIANCE` — the canonical identifier described by the staged
+    /// spec and emitted by every shipped fixture in the Radiance
+    /// reference distribution.
+    Radiance,
+    /// `#?RGBE` — the documented equivalent spelling some legacy
+    /// writers used.
+    Rgbe,
+}
+
+impl MagicLine {
+    fn as_bytes(self) -> &'static [u8] {
+        match self {
+            Self::Radiance => b"#?RADIANCE",
+            Self::Rgbe => b"#?RGBE",
+        }
+    }
+}
+
 /// Choice of RLE flavour for the encoded scanlines.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RleMode {
@@ -225,10 +259,31 @@ pub fn encode_hdr_with_rle(image: &HdrImage, rle: RleMode) -> Result<Vec<u8>> {
 /// what [`encode_hdr_with_rle`] would produce — only the bytes of the
 /// magic line, KEY=VALUE records, header terminator and resolution
 /// line change between `LineEnding::Lf` and `LineEnding::Crlf`.
+///
+/// The magic line is fixed at [`MagicLine::Radiance`] (`#?RADIANCE`);
+/// callers that need to emit the legacy [`MagicLine::Rgbe`] (`#?RGBE`)
+/// form should use [`encode_hdr_with_full_options`] instead.
 pub fn encode_hdr_with_options(
     image: &HdrImage,
     rle: RleMode,
     line_ending: LineEnding,
+) -> Result<Vec<u8>> {
+    encode_hdr_with_full_options(image, rle, line_ending, MagicLine::Radiance)
+}
+
+/// Maximum-control encode: pick the RLE flavour, the text-line
+/// terminator and the magic-line spelling independently.
+///
+/// The staged spec documents `#?RADIANCE` and `#?RGBE` as equivalent
+/// identifiers; this entry point lets callers pick which one their
+/// downstream consumer expects. The pixel payload, header records and
+/// resolution line are identical to what [`encode_hdr_with_options`]
+/// would produce — only the first line of the file changes.
+pub fn encode_hdr_with_full_options(
+    image: &HdrImage,
+    rle: RleMode,
+    line_ending: LineEnding,
+    magic: MagicLine,
 ) -> Result<Vec<u8>> {
     let w = image.width as usize;
     let h = image.height as usize;
@@ -281,7 +336,7 @@ pub fn encode_hdr_with_options(
         )));
     }
     let mut out = Vec::with_capacity(32 + out_w * out_h * 4);
-    write_header(&mut out, &image.header, line_ending);
+    write_header(&mut out, &image.header, line_ending, magic);
     write_resolution(&mut out, out_w, out_h, &image.header, line_ending);
     write_pixel_rows(&mut out, out_w, out_h, &oriented, effective_rle)?;
     Ok(out)
@@ -305,9 +360,9 @@ pub fn encode_hdr_rgb96f(
     encode_hdr(&img)
 }
 
-fn write_header(out: &mut Vec<u8>, header: &HdrHeader, eol: LineEnding) {
+fn write_header(out: &mut Vec<u8>, header: &HdrHeader, eol: LineEnding, magic: MagicLine) {
     let nl = eol.as_bytes();
-    out.extend_from_slice(b"#?RADIANCE");
+    out.extend_from_slice(magic.as_bytes());
     out.extend_from_slice(nl);
     out.extend_from_slice(format!("FORMAT={}", header.format.as_str()).as_bytes());
     out.extend_from_slice(nl);
@@ -639,6 +694,106 @@ mod tests {
                 assert!(err < 0.02, "mirror y={y} x={x}: {a} vs {b}");
             }
         }
+    }
+
+    #[test]
+    fn default_options_emit_radiance_magic_line() {
+        // `encode_hdr` / `encode_hdr_with_options` default to the
+        // canonical `#?RADIANCE` identifier. Pin the byte sequence so a
+        // future refactor that introduces a typo or changes the casing
+        // is caught immediately.
+        let img = pattern(16, 2);
+        let bytes = encode_hdr(&img).unwrap();
+        assert!(bytes.starts_with(b"#?RADIANCE\n"));
+        let bytes = encode_hdr_with_options(&img, RleMode::New, LineEnding::Lf).unwrap();
+        assert!(bytes.starts_with(b"#?RADIANCE\n"));
+        let bytes = encode_hdr_with_options(&img, RleMode::New, LineEnding::Crlf).unwrap();
+        assert!(bytes.starts_with(b"#?RADIANCE\r\n"));
+    }
+
+    #[test]
+    fn full_options_with_radiance_magic_matches_default_options() {
+        // The `MagicLine::Radiance` branch of `encode_hdr_with_full_options`
+        // must be byte-identical to `encode_hdr_with_options` (the
+        // documented default). Any deviation indicates the new entry
+        // point unintentionally changed the canonical wire image.
+        let img = pattern(16, 2);
+        let canonical = encode_hdr_with_options(&img, RleMode::New, LineEnding::Lf).unwrap();
+        let via_full =
+            encode_hdr_with_full_options(&img, RleMode::New, LineEnding::Lf, MagicLine::Radiance)
+                .unwrap();
+        assert_eq!(canonical, via_full);
+    }
+
+    #[test]
+    fn full_options_with_rgbe_magic_emits_legacy_identifier() {
+        // The `#?RGBE` spelling is documented by the staged spec as an
+        // equivalent identifier some legacy writers used. With
+        // `MagicLine::Rgbe` the file's first line must be `#?RGBE\n`,
+        // every other byte (header records, resolution line, pixel
+        // payload) must be identical to the `MagicLine::Radiance`
+        // output, and the decoder must accept the result.
+        let img = pattern(16, 2);
+        let radiance =
+            encode_hdr_with_full_options(&img, RleMode::New, LineEnding::Lf, MagicLine::Radiance)
+                .unwrap();
+        let rgbe =
+            encode_hdr_with_full_options(&img, RleMode::New, LineEnding::Lf, MagicLine::Rgbe)
+                .unwrap();
+        assert!(rgbe.starts_with(b"#?RGBE\n"));
+        assert!(radiance.starts_with(b"#?RADIANCE\n"));
+        // Length differs by exactly `len("#?RADIANCE") - len("#?RGBE") = 4`.
+        assert_eq!(radiance.len(), rgbe.len() + 4);
+        // Bytes after the magic line are identical.
+        let radiance_after = &radiance[b"#?RADIANCE\n".len()..];
+        let rgbe_after = &rgbe[b"#?RGBE\n".len()..];
+        assert_eq!(radiance_after, rgbe_after);
+        // The decoder accepts both spellings — round-trip the legacy
+        // file end-to-end so the pixel buffer survives.
+        let back = parse_hdr(&rgbe).unwrap();
+        assert_eq!(back.width, img.width);
+        assert_eq!(back.height, img.height);
+    }
+
+    #[test]
+    fn rgbe_magic_honours_line_ending() {
+        // The magic-line spelling and the line-ending choice are
+        // orthogonal — `MagicLine::Rgbe` + `LineEnding::Crlf` must end
+        // the identifier with `\r\n`, matching the rest of the text
+        // section.
+        let img = pattern(16, 2);
+        let bytes =
+            encode_hdr_with_full_options(&img, RleMode::New, LineEnding::Crlf, MagicLine::Rgbe)
+                .unwrap();
+        assert!(bytes.starts_with(b"#?RGBE\r\n"));
+        // Round-trip through the decoder.
+        let back = parse_hdr(&bytes).unwrap();
+        assert_eq!(back.width, 16);
+        assert_eq!(back.height, 2);
+    }
+
+    #[test]
+    fn rgbe_magic_round_trips_typed_header_records() {
+        // Selecting the legacy magic line must not affect any of the
+        // typed `KEY=VALUE` slots — they live below the identifier and
+        // should survive a round-trip with the same values.
+        let mut img = pattern(16, 2);
+        img.header.exposure = Some(1.5);
+        img.header.gamma = Some(2.2);
+        img.header.colorcorr = Some([1.0, 0.95, 0.9]);
+        img.header.software = Some("oxideav-hdr/rgbe-magic".to_owned());
+        let bytes =
+            encode_hdr_with_full_options(&img, RleMode::New, LineEnding::Lf, MagicLine::Rgbe)
+                .unwrap();
+        assert!(bytes.starts_with(b"#?RGBE\n"));
+        let back = parse_hdr(&bytes).unwrap();
+        assert_eq!(back.header.exposure, Some(1.5));
+        assert_eq!(back.header.gamma, Some(2.2));
+        assert_eq!(back.header.colorcorr, Some([1.0, 0.95, 0.9]));
+        assert_eq!(
+            back.header.software.as_deref(),
+            Some("oxideav-hdr/rgbe-magic")
+        );
     }
 
     #[test]
