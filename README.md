@@ -15,7 +15,7 @@ takes the same shape and emits a complete file with the canonical
 Clean-room implementation against the published format documentation
 (the published format documentation). No external library source consulted.
 
-## Coverage (round 248)
+## Coverage (round 252)
 
 | Feature                      | Read | Write |
 |------------------------------|:----:|:-----:|
@@ -26,6 +26,8 @@ Clean-room implementation against the published format documentation
 | Multiple `EXPOSURE` / `COLORCORR` / `PIXASPECT` records stacked multiplicatively | Y | n/a |
 | `COLORCORR` (3-float)        |  Y   |   Y   |
 | `HdrImage::effective_pixaspect` (header value or reference-manual default `1.0`) | helper | n/a |
+| `HdrImage::effective_exposure` (header value or staged-spec default `1.0` per "no `EXPOSURE` ⇒ none applied") | helper | n/a |
+| `HdrImage::effective_colorcorr` (header value or staged-spec default `[1.0, 1.0, 1.0]` per "should have unit brightness") | helper | n/a |
 | `PRIMARIES` (8-float chromaticity) | Y |   Y   |
 | `HdrImage::effective_primaries` (header value or reference-manual default `0.640 0.330 0.290 0.600 0.150 0.060 1/3 1/3` (default origin primaries) with equal-energy white) | helper | n/a |
 | All 8 axis-flag combinations |  Y   |  Y (Y-first + X-first transpose) |

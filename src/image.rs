@@ -331,6 +331,93 @@ mod tests {
     }
 
     #[test]
+    fn effective_exposure_defaults_to_one_when_absent() {
+        // Spec: "No EXPOSURE ⇒ none applied." Helper returns 1.0 (the
+        // identity multiplier) when the slot is None.
+        let img = HdrImage::new_rgb96f(1, 1, vec![0.0, 0.0, 0.0]);
+        assert!(img.header.exposure.is_none());
+        assert!((img.effective_exposure() - 1.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn effective_exposure_returns_header_value_when_set() {
+        // When the file declared (or the decoder folded multiple records
+        // into) an EXPOSURE= value, the helper returns it verbatim.
+        let mut img = HdrImage::new_rgb96f(1, 1, vec![0.0, 0.0, 0.0]);
+        img.header.exposure = Some(0.5);
+        assert!((img.effective_exposure() - 0.5).abs() < 1e-6);
+    }
+
+    #[test]
+    fn effective_exposure_returns_explicit_one_when_set() {
+        // An explicit `EXPOSURE=1.0` and the no-record case both produce
+        // 1.0 — the helper intentionally collapses both to the identity
+        // factor because the multiplicative semantics are identical. The
+        // caller that needs to distinguish "file declared it" from "file
+        // omitted it" matches on header.exposure directly.
+        let mut img = HdrImage::new_rgb96f(1, 1, vec![0.0, 0.0, 0.0]);
+        img.header.exposure = Some(1.0);
+        assert!((img.effective_exposure() - 1.0).abs() < 1e-6);
+        assert_eq!(img.header.exposure, Some(1.0));
+    }
+
+    #[test]
+    fn effective_exposure_does_not_perturb_header_slot() {
+        // The helper reads the slot — it must not clear it (the
+        // typed-slot inspector contract). Verified by re-reading the
+        // header field after the call.
+        let mut img = HdrImage::new_rgb96f(1, 1, vec![0.0, 0.0, 0.0]);
+        img.header.exposure = Some(2.5);
+        let _ = img.effective_exposure();
+        assert_eq!(img.header.exposure, Some(2.5));
+    }
+
+    #[test]
+    fn effective_colorcorr_defaults_to_unit_triple_when_absent() {
+        // Spec: COLORCORR "should have unit brightness so it does not
+        // change overall brightness"; absent record ⇒ the per-channel
+        // identity triple [1.0, 1.0, 1.0].
+        let img = HdrImage::new_rgb96f(1, 1, vec![0.0, 0.0, 0.0]);
+        assert!(img.header.colorcorr.is_none());
+        let c = img.effective_colorcorr();
+        assert!((c[0] - 1.0).abs() < 1e-6);
+        assert!((c[1] - 1.0).abs() < 1e-6);
+        assert!((c[2] - 1.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn effective_colorcorr_returns_header_value_when_set() {
+        let mut img = HdrImage::new_rgb96f(1, 1, vec![0.0, 0.0, 0.0]);
+        img.header.colorcorr = Some([2.0, 4.0, 8.0]);
+        let c = img.effective_colorcorr();
+        assert!((c[0] - 2.0).abs() < 1e-6);
+        assert!((c[1] - 4.0).abs() < 1e-6);
+        assert!((c[2] - 8.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn effective_colorcorr_returns_explicit_unit_triple_when_set() {
+        // Explicit `COLORCORR=1 1 1` and absent-record both produce
+        // [1, 1, 1]. The helper folds them; callers needing the
+        // distinction match the typed slot.
+        let mut img = HdrImage::new_rgb96f(1, 1, vec![0.0, 0.0, 0.0]);
+        img.header.colorcorr = Some([1.0, 1.0, 1.0]);
+        let c = img.effective_colorcorr();
+        assert!((c[0] - 1.0).abs() < 1e-6);
+        assert!((c[1] - 1.0).abs() < 1e-6);
+        assert!((c[2] - 1.0).abs() < 1e-6);
+        assert_eq!(img.header.colorcorr, Some([1.0, 1.0, 1.0]));
+    }
+
+    #[test]
+    fn effective_colorcorr_does_not_perturb_header_slot() {
+        let mut img = HdrImage::new_rgb96f(1, 1, vec![0.0, 0.0, 0.0]);
+        img.header.colorcorr = Some([0.7, 0.5, 0.3]);
+        let _ = img.effective_colorcorr();
+        assert_eq!(img.header.colorcorr, Some([0.7, 0.5, 0.3]));
+    }
+
+    #[test]
     fn effective_primaries_is_idempotent_with_record_roundtrip() {
         // The default Radiance primaries must survive the on-disk
         // PRIMARIES record round-trip without drift, so a caller that
@@ -461,6 +548,64 @@ impl HdrImage {
     /// any extra arithmetic.
     pub fn effective_pixaspect(&self) -> f32 {
         self.header.pixaspect.unwrap_or(1.0)
+    }
+
+    /// Cumulative `EXPOSURE=` multiplier the picture declared, with the
+    /// staged spec's "no `EXPOSURE` ⇒ none applied" default of `1.0`
+    /// substituted when no record was present.
+    ///
+    /// Per the staged spec
+    /// (`docs/image/hdr/radiance-hdr-rgbe-format.md` §1 EXPOSURE row),
+    /// `EXPOSURE=` is a single-float, cumulative-multiplicative scalar
+    /// that the writer has already folded into the stored pixels. The
+    /// decoder collapses multiple records into the running product in
+    /// [`HdrHeader::exposure`], and the spec is explicit that the
+    /// absence of any record means no multiplier was applied (the
+    /// identity factor `1.0`). Through round 251 the only way to read
+    /// the cumulative factor with the spec-documented default applied
+    /// was to write the `header.exposure.unwrap_or(1.0)` two-token
+    /// boilerplate at every call site; this helper does the
+    /// substitution in one call without perturbing
+    /// [`HdrHeader::exposure`], so callers that need to distinguish
+    /// "file declared `EXPOSURE=1.0` explicitly" from "no record was
+    /// present" can still match on the typed slot directly.
+    ///
+    /// Mirrors [`Self::effective_pixaspect`] / [`Self::effective_primaries`]
+    /// in shape: a single `f32`-returning method that pre-applies the
+    /// spec-documented default for the most common
+    /// "what did the file say, or what should I assume" case.
+    pub fn effective_exposure(&self) -> f32 {
+        self.header.exposure.unwrap_or(1.0)
+    }
+
+    /// Cumulative `COLORCORR=` per-channel multiplier the picture
+    /// declared, with the staged spec's "should have unit brightness"
+    /// default of `[1.0, 1.0, 1.0]` substituted when no record was
+    /// present.
+    ///
+    /// Per the staged spec
+    /// (`docs/image/hdr/radiance-hdr-rgbe-format.md` §1 COLORCORR row),
+    /// `COLORCORR=` is a 3-float cumulative-multiplicative
+    /// per-primary correction the writer has already folded into the
+    /// stored channels. The decoder collapses multiple records into the
+    /// element-wise product in [`HdrHeader::colorcorr`]; the spec
+    /// treats the absence of any record as the per-channel identity
+    /// triple `[1.0, 1.0, 1.0]` (the "should have unit brightness"
+    /// invariant the spec spells out, applied to the absent-record
+    /// case). Through round 251 the only way to read the cumulative
+    /// triple with the spec-documented default applied was to write
+    /// the `header.colorcorr.unwrap_or([1.0; 3])` boilerplate at every
+    /// call site; this helper does the substitution in one call
+    /// without perturbing [`HdrHeader::colorcorr`], so callers that
+    /// need to distinguish "file declared `COLORCORR=1 1 1` explicitly"
+    /// from "no record was present" can still match on the typed slot
+    /// directly.
+    ///
+    /// Mirrors [`Self::effective_exposure`] /
+    /// [`Self::effective_pixaspect`] / [`Self::effective_primaries`]
+    /// in shape.
+    pub fn effective_colorcorr(&self) -> [f32; 3] {
+        self.header.colorcorr.unwrap_or([1.0, 1.0, 1.0])
     }
 
     /// CIE chromaticity coordinates of the three RGB primaries and the

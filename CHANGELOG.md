@@ -9,6 +9,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Round 252 (spec-compliance — `effective_exposure` / `effective_colorcorr`
+  inspectors): two new `HdrImage` helpers,
+  `effective_exposure() -> f32` and `effective_colorcorr() -> [f32; 3]`,
+  that mirror the round-208 `effective_pixaspect` and round-214
+  `effective_primaries` shape: each reads the typed
+  [`HdrHeader`] slot and substitutes the staged-spec default when no
+  record was present, without perturbing the underlying slot. The
+  staged spec at `docs/image/hdr/radiance-hdr-rgbe-format.md` §1
+  documents `EXPOSURE=` as a "cumulative" multiplier "already applied
+  to all pixels" with the explicit "No `EXPOSURE` ⇒ none applied"
+  default of `1.0` (the identity factor), and `COLORCORR=` as a
+  per-primary multiplier that "should have unit brightness so it does
+  not change overall brightness", giving the absent-record default of
+  the per-channel identity triple `[1.0, 1.0, 1.0]`. Through round 251
+  the only way to read the cumulative factor with the spec-documented
+  default applied was to write the `header.exposure.unwrap_or(1.0)` /
+  `header.colorcorr.unwrap_or([1.0; 3])` boilerplate at every call
+  site; the new helpers do the substitution in one call. Callers that
+  need to distinguish "file declared `EXPOSURE=1.0` explicitly" from
+  "no record was present" can still match on the typed slot directly.
+  Seven new unit tests pin the contract: each helper returns the
+  spec-default when the slot is `None`, returns the header value
+  verbatim when the slot is set (including the explicit `1.0` /
+  `[1.0, 1.0, 1.0]` cases that fold into the default branch), and
+  leaves the underlying `HdrHeader::exposure` / `HdrHeader::colorcorr`
+  slot untouched (the typed-slot inspector contract). The existing
+  `apply_exposure` / `apply_colorcorr` /
+  `recover_original_radiance` / `recover_original_colorcorr`
+  mutators, the round-1..251 happy path, and the standalone
+  (`default-features = false`) build are bit-identical — the
+  inspectors are purely additive.
+
 - Round 248 (spec-compliance — `MagicLine` encoder option for the legacy
   `#?RGBE` identifier): new public `MagicLine` enum
   (`Radiance` / `Rgbe`) and a matching maximum-control entry point
