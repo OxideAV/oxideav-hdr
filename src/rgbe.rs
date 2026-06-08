@@ -21,6 +21,45 @@
 //! `[128, 256)` range (i.e. uses every available bit of dynamic range),
 //! then scales the other two channels by the same exponent.
 
+/// Returns `true` when an RGBE pixel is the all-zero sentinel the
+/// staged spec (`docs/image/hdr/radiance-hdr-rgbe-format.md` §3)
+/// documents as "exactly black; the zero exponent is the sentinel
+/// for 'no value', so there is no valid pixel with exponent byte 0".
+///
+/// The sentinel test keys off the exponent byte alone — the mantissa
+/// bytes (`rgbe[0..=2]`) are intentionally not inspected, mirroring
+/// the rule embedded in [`rgbe_unbiased_exponent`] and [`rgbe_to_rgb`]
+/// (both treat any `rgbe[3] == 0` as black regardless of the
+/// mantissa values). The spec is explicit on this point: exponent
+/// byte `0` is the "no value" marker regardless of what the
+/// mantissas hold, so `[255, 255, 255, 0]` is just as much the
+/// sentinel as `[0, 0, 0, 0]`.
+///
+/// This is the `bool`-returning counterpart to
+/// [`rgbe_unbiased_exponent`] (which returns `Option<i32>` for the
+/// same branch). Pick this inspector when only the boolean
+/// "is this pixel the sentinel?" question matters — e.g. a scanline
+/// walk that wants to skip the sentinel pixels before a luminance
+/// reduction, or a fuzz oracle that counts how many sentinel
+/// pixels a decoder encountered. Picking up only the boolean avoids
+/// the `Option::is_none()` unwrap that the existing
+/// `rgbe_unbiased_exponent` path requires for the same use-case,
+/// and means the call site does not have to mentally substitute
+/// "exponent value `None`" for "the pixel is the sentinel".
+///
+/// Contract is the spec's verbatim "no valid pixel with exponent
+/// byte 0" rule: the function returns `true` if and only if
+/// `rgbe[3] == 0`. Composes with the existing inspectors —
+/// `rgbe_is_zero_pixel(p)` is exactly
+/// `rgbe_unbiased_exponent(p).is_none()` and exactly
+/// `rgbe_to_rgb(p) == [0.0, 0.0, 0.0]`, and any of the three
+/// formulations may be picked at the call site for whichever
+/// reads most naturally.
+#[inline]
+pub fn rgbe_is_zero_pixel(rgbe: [u8; 4]) -> bool {
+    rgbe[3] == 0
+}
+
 /// Returns the unbiased shared exponent of an RGBE pixel — the
 /// integer `n` such that each decoded channel equals
 /// `(mantissa / 256) * 2^n` — or `None` when the pixel's exponent byte
@@ -258,6 +297,95 @@ mod tests {
                 expected
             );
         }
+    }
+
+    #[test]
+    fn is_zero_pixel_matches_sentinel_byte() {
+        // Spec §3: the all-zero quad is "exactly black; the zero
+        // exponent is the sentinel for 'no value'". The canonical
+        // sentinel shape returns true.
+        assert!(rgbe_is_zero_pixel([0, 0, 0, 0]));
+    }
+
+    #[test]
+    fn is_zero_pixel_keys_off_exponent_only() {
+        // Mantissas must not influence the test — only `rgbe[3] == 0`
+        // marks a no-value pixel per spec §3.
+        assert!(rgbe_is_zero_pixel([255, 255, 255, 0]));
+        assert!(rgbe_is_zero_pixel([7, 11, 200, 0]));
+        assert!(rgbe_is_zero_pixel([1, 1, 1, 0]));
+    }
+
+    #[test]
+    fn is_zero_pixel_false_for_every_nonzero_exponent() {
+        // Boundary bytes the spec §3 worked example + bias
+        // documentation imply: 1 (most negative unbiased), 127, 128
+        // (exponent-zero boundary), 129 (the worked example), 255
+        // (most positive unbiased). All must be reported as
+        // non-sentinel regardless of the mantissa bytes.
+        for &e in &[1u8, 127, 128, 129, 255] {
+            assert!(!rgbe_is_zero_pixel([0, 0, 0, e]));
+            assert!(!rgbe_is_zero_pixel([200, 100, 50, e]));
+        }
+        // Spec §3 worked example pixel.
+        assert!(!rgbe_is_zero_pixel([128, 64, 32, 129]));
+    }
+
+    #[test]
+    fn is_zero_pixel_agrees_with_unbiased_exponent_none_branch() {
+        // The boolean inspector composes with the existing
+        // `rgbe_unbiased_exponent` inspector: `is_zero_pixel(p)` ==
+        // `unbiased_exponent(p).is_none()` for every possible quad.
+        // Exhaustively walk every exponent byte (the only byte the
+        // sentinel rule keys off) with two mantissa shapes to pin
+        // the cross-formulation invariant.
+        for e in 0u8..=255 {
+            for mantissas in &[[0u8, 0, 0], [200, 100, 50]] {
+                let p = [mantissas[0], mantissas[1], mantissas[2], e];
+                assert_eq!(
+                    rgbe_is_zero_pixel(p),
+                    rgbe_unbiased_exponent(p).is_none(),
+                    "disagreement on quad {p:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn is_zero_pixel_agrees_with_rgbe_to_rgb_black_branch() {
+        // Cross-check against the decode formula: a sentinel pixel
+        // decodes to `[0.0, 0.0, 0.0]`, and `rgbe_to_rgb` returns a
+        // strictly-positive triple for any non-sentinel pixel with
+        // at least one nonzero mantissa.
+        for e in 0u8..=255 {
+            let p = [128_u8, 64, 32, e];
+            let decoded = rgbe_to_rgb(p);
+            let is_black = decoded == [0.0, 0.0, 0.0];
+            assert_eq!(
+                rgbe_is_zero_pixel(p),
+                is_black,
+                "quad {p:?} decoded to {decoded:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn is_zero_pixel_round_trips_through_encoder() {
+        // After encoding a black RGB triple the encoder produces the
+        // all-zero quad; the inspector reports that as the sentinel.
+        // A non-zero RGB triple produces a quad with a nonzero
+        // exponent byte and the inspector reports false.
+        assert!(rgbe_is_zero_pixel(rgb_to_rgbe([0.0, 0.0, 0.0])));
+        assert!(!rgbe_is_zero_pixel(rgb_to_rgbe([4.0, 2.0, 1.0])));
+        // The defensive "negative / non-finite clamps to zero" branch
+        // also produces the sentinel (matches the rgb_to_rgbe
+        // documented behaviour: "Negative or non-finite inputs are
+        // clamped to zero before encoding").
+        assert!(rgbe_is_zero_pixel(rgb_to_rgbe([
+            -1.0,
+            f32::NAN,
+            f32::INFINITY,
+        ])));
     }
 
     #[test]

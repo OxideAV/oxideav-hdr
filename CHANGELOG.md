@@ -9,6 +9,42 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Round 261 (spec-compliance — `rgbe_is_zero_pixel` sentinel inspector):
+  new `pub fn rgbe_is_zero_pixel(rgbe: [u8; 4]) -> bool` on the `rgbe`
+  module (re-exported at the crate root), the `bool`-returning
+  counterpart to the round-257 `rgbe_unbiased_exponent` inspector.
+  Returns `true` when the pixel is the all-zero sentinel the staged
+  spec at `docs/image/hdr/radiance-hdr-rgbe-format.md` §3 documents as
+  "exactly black; the zero exponent is the sentinel for 'no value', so
+  there is no valid pixel with exponent byte 0", and `false` otherwise.
+  The sentinel test keys off the exponent byte alone (`rgbe[3] == 0`),
+  matching the rule embedded in `rgbe_unbiased_exponent` and
+  `rgbe_to_rgb` — the spec is explicit that exponent byte `0` is the
+  "no value" marker regardless of the mantissa values, so
+  `[255, 255, 255, 0]` and `[7, 11, 200, 0]` both report `true`. Six
+  new unit tests pin the contract: the canonical `[0, 0, 0, 0]`
+  sentinel returns `true`; mantissas are not inspected (the same
+  sentinel shape with arbitrary mantissas still returns `true`); the
+  boundary exponent bytes (1, 127, 128, 129, 255) plus the
+  spec-canonical worked example `(128, 64, 32, 129)` all return
+  `false`; an exhaustive (every exponent byte × two mantissa shapes)
+  cross-check confirms `rgbe_is_zero_pixel(p) ==
+  rgbe_unbiased_exponent(p).is_none()` so the two inspectors compose
+  losslessly; an exhaustive cross-check against `rgbe_to_rgb` confirms
+  the boolean tracks the decoder's black-branch decision exactly; and
+  a round-trip through `rgb_to_rgbe` confirms the inspector reports
+  the sentinel for black-encode inputs (including the defensive
+  negative / non-finite clamp branch the encoder documents). The
+  existing `rgbe_unbiased_exponent` / `rgbe_to_rgb` / `rgb_to_rgbe`
+  primitives, the round-1..260 happy path, and the standalone
+  (`default-features = false`) build are bit-identical — the
+  inspector is purely additive. Useful for the "is this pixel the
+  sentinel?" call site that doesn't need the exponent value (e.g. a
+  scanline walk that skips sentinel pixels before a luminance scan,
+  or a fuzz oracle counting sentinel pixels) where the
+  `Option::is_none()` unwrap on the existing inspector is incidental
+  noise.
+
 - Round 257 (spec-compliance — `rgbe_unbiased_exponent` inspector):
   new `pub fn rgbe_unbiased_exponent(rgbe: [u8; 4]) -> Option<i32>`
   on the `rgbe` module (re-exported at the crate root), returning
