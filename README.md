@@ -15,7 +15,7 @@ takes the same shape and emits a complete file with the canonical
 Clean-room implementation against the published format documentation
 (the published format documentation). No external library source consulted.
 
-## Coverage (round 252)
+## Coverage (round 257)
 
 | Feature                      | Read | Write |
 |------------------------------|:----:|:-----:|
@@ -32,6 +32,7 @@ Clean-room implementation against the published format documentation
 | `HdrImage::effective_primaries` (header value or reference-manual default `0.640 0.330 0.290 0.600 0.150 0.060 1/3 1/3` (default origin primaries) with equal-energy white) | helper | n/a |
 | All 8 axis-flag combinations |  Y   |  Y (Y-first + X-first transpose) |
 | 32-bit_rle_rgbe pixels       |  Y   |   Y   |
+| `rgbe_unbiased_exponent([u8; 4]) -> Option<i32>` (returns the spec-§3 `byte - 128` shared exponent, or `None` for the all-zero sentinel pixel — `Some(1)` for the spec-canonical worked example `(128, 64, 32, 129)`) | inspector | n/a |
 | 32-bit_rle_xyze pixels       |  Y   |   Y (with helpers in `xyz`) |
 | New RLE (`0x02 0x02 hi lo`)  |  Y   |   Y   |
 | Old RLE (sentinel pixels)    |  Y   |   Y (`RleMode::Old`) |

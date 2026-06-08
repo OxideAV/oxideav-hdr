@@ -60,7 +60,7 @@ pub use error::{HdrError, Result};
 pub use header::{AxisSign, HdrFormat, HdrHeader, Primaries};
 pub use image::{HdrImage, HdrPixelFormat};
 pub use limits::HdrLimits;
-pub use rgbe::{rgb_to_rgbe, rgbe_to_rgb};
+pub use rgbe::{rgb_to_rgbe, rgbe_to_rgb, rgbe_unbiased_exponent};
 pub use rle::FallbackMode;
 pub use tonemap::{tone_map, ToneMap};
 pub use xyz::{

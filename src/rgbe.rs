@@ -21,6 +21,49 @@
 //! `[128, 256)` range (i.e. uses every available bit of dynamic range),
 //! then scales the other two channels by the same exponent.
 
+/// Returns the unbiased shared exponent of an RGBE pixel — the
+/// integer `n` such that each decoded channel equals
+/// `(mantissa / 256) * 2^n` — or `None` when the pixel's exponent byte
+/// is the all-zero sentinel that the staged spec
+/// (`docs/image/hdr/radiance-hdr-rgbe-format.md` §3) documents as
+/// "exactly black; the zero exponent is the sentinel for 'no value',
+/// so there is no valid pixel with exponent byte 0".
+///
+/// The on-disk exponent byte carries an **excess-128 bias** per spec
+/// §3 ("The exponent byte carries an excess-128 bias"), so the
+/// returned `i32` is `rgbe[3] as i32 - 128`. For the canonical worked
+/// example `(R,G,B)=(1.0, 0.5, 0.25) -> bytes (128, 64, 32, 129)`
+/// (spec §3) this returns `Some(1)` — the channels are `mantissa/256
+/// * 2^1`, matching `128/256*2 = 1.0`, `64/256*2 = 0.5`,
+/// `32/256*2 = 0.25`.
+///
+/// The mantissas (`rgbe[0..=2]`) are intentionally not inspected —
+/// the sentinel rule keys off the exponent byte alone, and the spec
+/// is explicit that exponent byte `0` is the "no value" marker
+/// regardless of the mantissa values. Callers that need the full
+/// channel triple should reach for [`rgbe_to_rgb`] instead; this
+/// inspector is for the common "what magnitude does this pixel sit
+/// at?" use-case where building the three `f32` channels would be
+/// wasted work (e.g. picking a per-pixel auto-exposure factor without
+/// fully decoding the picture, or filtering out the sentinel pixels
+/// before a luminance scan).
+///
+/// Returning `Option<i32>` lets the sentinel case be matched
+/// explicitly without the caller re-deriving the "exponent == 0
+/// means black" rule at every call site. The shape mirrors the
+/// `effective_*` family on [`crate::HdrImage`]: a single inspector
+/// that embeds one spec-documented quirk and returns the
+/// straightforward value otherwise.
+#[inline]
+pub fn rgbe_unbiased_exponent(rgbe: [u8; 4]) -> Option<i32> {
+    let e = rgbe[3];
+    if e == 0 {
+        None
+    } else {
+        Some(e as i32 - 128)
+    }
+}
+
 /// Decode one shared-exponent pixel. The output array is `[R, G, B]`
 /// in the source colour space (RGB for `32-bit_rle_rgbe` files, CIE
 /// XYZ for `32-bit_rle_xyze`).
@@ -149,5 +192,88 @@ mod tests {
     fn negative_and_nan_clamp_to_zero() {
         let rgbe = rgb_to_rgbe([-1.0, f32::NAN, f32::INFINITY]);
         assert_eq!(rgbe, [0, 0, 0, 0]);
+    }
+
+    #[test]
+    fn unbiased_exponent_zero_pixel_is_sentinel() {
+        // Spec §3: the all-zero RGBE quad means "exactly black; the
+        // zero exponent is the sentinel for 'no value'". Returning
+        // None pins that branch.
+        assert_eq!(rgbe_unbiased_exponent([0, 0, 0, 0]), None);
+    }
+
+    #[test]
+    fn unbiased_exponent_sentinel_keys_off_exponent_only() {
+        // Mantissas must not influence the sentinel test — only the
+        // exponent byte == 0 marks a no-value pixel per spec §3.
+        assert_eq!(rgbe_unbiased_exponent([255, 255, 255, 0]), None);
+        assert_eq!(rgbe_unbiased_exponent([7, 11, 200, 0]), None);
+    }
+
+    #[test]
+    fn unbiased_exponent_spec_worked_example() {
+        // Spec §3: (R,G,B)=(1.0, 0.5, 0.25) -> bytes (128, 64, 32, 129).
+        // Channels equal `mantissa/256 * 2^n`; with mantissa 128
+        // giving 1.0 the unbiased exponent must be 1
+        // (128/256 * 2^1 = 1.0).
+        assert_eq!(rgbe_unbiased_exponent([128, 64, 32, 129]), Some(1));
+    }
+
+    #[test]
+    fn unbiased_exponent_byte_128_is_zero() {
+        // The excess-128 bias means a stored byte of 128 decodes to
+        // an unbiased exponent of 0 — the channel-scale boundary
+        // where mantissa/256 IS the channel value.
+        assert_eq!(rgbe_unbiased_exponent([200, 100, 50, 128]), Some(0));
+    }
+
+    #[test]
+    fn unbiased_exponent_full_range_byte_values_pin_bias() {
+        // Pin every non-sentinel exponent byte to the
+        // `byte - 128` formula across the boundary cases the spec
+        // documents: 1 -> -127, 127 -> -1, 128 -> 0, 129 -> 1,
+        // 255 -> 127.
+        assert_eq!(rgbe_unbiased_exponent([0, 0, 0, 1]), Some(-127));
+        assert_eq!(rgbe_unbiased_exponent([0, 0, 0, 127]), Some(-1));
+        assert_eq!(rgbe_unbiased_exponent([0, 0, 0, 128]), Some(0));
+        assert_eq!(rgbe_unbiased_exponent([0, 0, 0, 129]), Some(1));
+        assert_eq!(rgbe_unbiased_exponent([0, 0, 0, 255]), Some(127));
+    }
+
+    #[test]
+    fn unbiased_exponent_agrees_with_rgbe_to_rgb_magnitude() {
+        // Cross-check: for a non-sentinel pixel the returned exponent
+        // `n` must satisfy `decoded[i] == mantissa[i] / 256 * 2^n`
+        // exactly (the channel-decode formula the inspector summarises).
+        let rgbe = [200_u8, 100, 50, 130];
+        let n = rgbe_unbiased_exponent(rgbe).expect("non-sentinel");
+        let decoded = rgbe_to_rgb(rgbe);
+        let scale = (2.0_f32).powi(n) / 256.0;
+        for (i, &m) in rgbe[..3].iter().enumerate() {
+            let expected = m as f32 * scale;
+            assert!(
+                (decoded[i] - expected).abs() < 1e-6,
+                "ch {i}: decoded {} vs formula {}",
+                decoded[i],
+                expected
+            );
+        }
+    }
+
+    #[test]
+    fn unbiased_exponent_roundtrips_through_encoder() {
+        // After encoding a non-zero RGB triple the exponent the
+        // encoder selected is exactly the value the inspector reports;
+        // a black-pixel encode produces the sentinel byte and the
+        // inspector reflects that as None.
+        let rgbe = rgb_to_rgbe([4.0, 2.0, 1.0]);
+        // 4.0 = 0.5 * 2^3 ⇒ encoder picks exponent 3 (frexp), stored
+        // as byte 131 (excess-128).
+        assert_eq!(rgbe_unbiased_exponent(rgbe), Some(3));
+        // Black encodes to the all-zero quad, which the inspector
+        // reports as the sentinel.
+        let black = rgb_to_rgbe([0.0, 0.0, 0.0]);
+        assert_eq!(black, [0, 0, 0, 0]);
+        assert_eq!(rgbe_unbiased_exponent(black), None);
     }
 }

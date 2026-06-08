@@ -9,6 +9,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Round 257 (spec-compliance — `rgbe_unbiased_exponent` inspector):
+  new `pub fn rgbe_unbiased_exponent(rgbe: [u8; 4]) -> Option<i32>`
+  on the `rgbe` module (re-exported at the crate root), returning
+  the unbiased shared exponent of an RGBE pixel — the integer `n`
+  such that each channel equals `(mantissa / 256) * 2^n` — or
+  `None` when the pixel's exponent byte is the all-zero sentinel
+  the staged spec at `docs/image/hdr/radiance-hdr-rgbe-format.md`
+  §3 documents as "exactly black; the zero exponent is the sentinel
+  for 'no value', so there is no valid pixel with exponent byte 0".
+  The on-disk exponent byte carries an excess-128 bias per the same
+  spec section ("The exponent byte carries an excess-128 bias"); the
+  inspector returns `rgbe[3] as i32 - 128`. Pinned by seven new unit
+  tests: the all-zero quad returns `None`; mantissas are not
+  inspected (the sentinel keys off the exponent byte alone, so
+  `[255, 255, 255, 0]` and `[7, 11, 200, 0]` both return `None`);
+  the spec-canonical worked example `(R,G,B)=(1.0, 0.5, 0.25) ->
+  bytes (128, 64, 32, 129)` returns `Some(1)`; boundary bytes
+  (1, 127, 128, 129, 255) pin the bias formula across the full
+  non-sentinel range; a cross-check against `rgbe_to_rgb` confirms
+  the returned `n` satisfies `decoded[i] == mantissa[i] / 256 *
+  2^n` exactly; and a round-trip through `rgb_to_rgbe` confirms the
+  inspector reads back the exponent the encoder selected (and
+  reflects the all-zero sentinel for a black-pixel encode). Useful
+  for the "what magnitude does this pixel sit at?" use-case where
+  building the three `f32` channels would be wasted work — e.g.
+  picking a per-pixel auto-exposure factor without fully decoding
+  the picture, or filtering out the sentinel pixels before a
+  luminance scan. The existing `rgbe_to_rgb` / `rgb_to_rgbe`
+  primitives, the round-1..256 happy path, and the standalone
+  (`default-features = false`) build are bit-identical — the
+  inspector is purely additive.
+
 - Round 252 (spec-compliance — `effective_exposure` / `effective_colorcorr`
   inspectors): two new `HdrImage` helpers,
   `effective_exposure() -> f32` and `effective_colorcorr() -> [f32; 3]`,
