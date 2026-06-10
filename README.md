@@ -15,7 +15,7 @@ takes the same shape and emits a complete file with the canonical
 Clean-room implementation against the published format documentation
 (the published format documentation). No external library source consulted.
 
-## Coverage (round 261)
+## Coverage (round 269)
 
 | Feature                      | Read | Write |
 |------------------------------|:----:|:-----:|
@@ -34,6 +34,7 @@ Clean-room implementation against the published format documentation
 | 32-bit_rle_rgbe pixels       |  Y   |   Y   |
 | `rgbe_unbiased_exponent([u8; 4]) -> Option<i32>` (returns the spec-§3 `byte - 128` shared exponent, or `None` for the all-zero sentinel pixel — `Some(1)` for the spec-canonical worked example `(128, 64, 32, 129)`) | inspector | n/a |
 | `rgbe_is_zero_pixel([u8; 4]) -> bool` (`bool`-returning sentinel inspector keying off `rgbe[3] == 0` per spec §3's "no valid pixel with exponent byte 0" rule — the boolean counterpart to `rgbe_unbiased_exponent` for call sites that don't need the exponent value) | inspector | n/a |
+| `rgbe_channel_scale([u8; 4]) -> Option<f32>` (the spec-§3 decode-formula factor `f = ldexp(1.0, byte − (128 + 8))` such that each channel equals `mantissa * f`, or `None` for the all-zero sentinel — `Some(2⁻⁷)` for the spec-canonical worked example `(128, 64, 32, 129)`; completes the quad-inspector trio) | inspector | n/a |
 | 32-bit_rle_xyze pixels       |  Y   |   Y (with helpers in `xyz`) |
 | New RLE (`0x02 0x02 hi lo`)  |  Y   |   Y   |
 | Old RLE (sentinel pixels)    |  Y   |   Y (`RleMode::Old`) |

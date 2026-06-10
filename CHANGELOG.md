@@ -9,6 +9,54 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Round 269 (spec-compliance — `rgbe_channel_scale` inspector): new
+  `pub fn rgbe_channel_scale(rgbe: [u8; 4]) -> Option<f32>` on the
+  `rgbe` module (re-exported at the crate root), completing the
+  quad-inspector trio started by the round-257
+  `rgbe_unbiased_exponent` and round-261 `rgbe_is_zero_pixel`
+  inspectors. Returns the shared per-channel scale factor `f` of an
+  RGBE pixel — the value such that each decoded channel equals
+  `mantissa_byte as f32 * f` — or `None` when the exponent byte is
+  the all-zero sentinel the staged spec at
+  `docs/image/hdr/radiance-hdr-rgbe-format.md` §3 documents as
+  "exactly black; the zero exponent is the sentinel for 'no value',
+  so there is no valid pixel with exponent byte 0". The factor is the
+  spec-§3 decode formula verbatim ("remove bias + 8-bit scale":
+  `f = ldexp(1.0, rgbe[3] - (128 + 8))` — the excess-128 exponent
+  bias plus the `-8` the 256-mantissa scale contributes), computed
+  with the same `ldexp` helper `rgbe_to_rgb` uses internally so the
+  two paths agree bit-exactly. For the spec-canonical worked example
+  `(R,G,B)=(1.0, 0.5, 0.25) -> bytes (128, 64, 32, 129)` the
+  inspector returns `Some(2^-7)` and `mantissa * f` recovers all
+  three channels exactly. Seven new unit tests pin the contract: the
+  all-zero quad returns `None`; mantissas are not inspected (the
+  sentinel keys off the exponent byte alone, so `[255, 255, 255, 0]`
+  and `[7, 11, 200, 0]` both return `None`); the worked example
+  returns exactly `0.0078125` with all three channels recovered by
+  exact-equality assertions; boundary bytes pin the
+  `f = 2^(byte - 136)` formula (`136 -> 1.0` unit-scale boundary,
+  `135 -> 0.5`, `137 -> 2.0`, `1 -> 2^-135` subnormal-but-exact,
+  `255 -> 2^119`) and an exhaustive walk confirms every non-sentinel
+  scale is finite and strictly positive; an exhaustive (every
+  exponent byte) cross-check against `rgbe_to_rgb` confirms
+  `decoded[i] == mantissa[i] * f` bit-exactly on the non-sentinel
+  branch and `[0.0, 0.0, 0.0]` on the sentinel branch; a second
+  exhaustive cross-check pins the trio invariants
+  (`rgbe_channel_scale(p).is_none() == rgbe_is_zero_pixel(p)` and
+  `f == 2^n / 256` with `n` from `rgbe_unbiased_exponent`); and a
+  round-trip through `rgb_to_rgbe` confirms `mantissa * f` of the
+  encoder's quad recovers the encode input exactly for a
+  power-of-two triple (and the sentinel for a black encode). Useful
+  for the call site that actually multiplies — e.g. a luminance
+  reduction folding the three mantissa bytes through their weights
+  with the shared scale applied once, or a single-channel probe that
+  wants `rgbe[1] as f32 * f` without building the other two channels
+  the way `rgbe_to_rgb` does. The existing `rgbe_to_rgb` /
+  `rgb_to_rgbe` / `rgbe_unbiased_exponent` / `rgbe_is_zero_pixel`
+  primitives, the round-1..268 happy path, and the standalone
+  (`default-features = false`) build are bit-identical — the
+  inspector is purely additive.
+
 - Round 261 (spec-compliance — `rgbe_is_zero_pixel` sentinel inspector):
   new `pub fn rgbe_is_zero_pixel(rgbe: [u8; 4]) -> bool` on the `rgbe`
   module (re-exported at the crate root), the `bool`-returning

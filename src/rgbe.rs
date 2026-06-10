@@ -103,6 +103,55 @@ pub fn rgbe_unbiased_exponent(rgbe: [u8; 4]) -> Option<i32> {
     }
 }
 
+/// Returns the shared per-channel scale factor of an RGBE pixel — the
+/// `f32` value `f` such that each decoded channel equals
+/// `mantissa_byte as f32 * f` — or `None` when the pixel's exponent
+/// byte is the all-zero sentinel the staged spec
+/// (`docs/image/hdr/radiance-hdr-rgbe-format.md` §3) documents as
+/// "exactly black; the zero exponent is the sentinel for 'no value',
+/// so there is no valid pixel with exponent byte 0".
+///
+/// The returned factor is the staged spec's decode formula verbatim:
+/// `f = ldexp(1.0, rgbe[3] - (128 + 8))` ("remove bias + 8-bit
+/// scale" — the exponent byte carries an excess-128 bias per spec §3
+/// and the 256-mantissa scale contributes the extra `-8`). For the
+/// spec-canonical worked example `(R,G,B)=(1.0, 0.5, 0.25) -> bytes
+/// (128, 64, 32, 129)` this returns `Some(2^-7)` = `Some(0.0078125)`,
+/// and `128 * 2^-7 = 1.0`, `64 * 2^-7 = 0.5`, `32 * 2^-7 = 0.25`
+/// recover the three channels exactly.
+///
+/// This completes the quad-inspector trio: [`rgbe_is_zero_pixel`]
+/// answers "is this pixel the sentinel?" (`bool`),
+/// [`rgbe_unbiased_exponent`] answers "what magnitude does it sit at?"
+/// (the `n` in `(mantissa / 256) * 2^n`), and this inspector answers
+/// "what do I multiply the mantissa bytes by?" (the ready-to-use
+/// `f32` factor, `f = 2^n / 256`). Pick this one when the call site
+/// actually multiplies — e.g. a luminance reduction that folds the
+/// three mantissa bytes through their weights and applies the shared
+/// scale once (`lum_scale = f * (w_r*m_r + w_g*m_g + w_b*m_b)`), or a
+/// single-channel probe that wants `rgbe[1] as f32 * f` without
+/// paying for the other two channels the way [`rgbe_to_rgb`] does.
+///
+/// The mantissas (`rgbe[0..=2]`) are intentionally not inspected —
+/// the sentinel rule keys off the exponent byte alone, matching
+/// [`rgbe_is_zero_pixel`] / [`rgbe_unbiased_exponent`] /
+/// [`rgbe_to_rgb`]. The factor is computed with the same `ldexp`
+/// helper [`rgbe_to_rgb`] uses internally, so
+/// `rgbe_to_rgb(p)[i] == p[i] as f32 * rgbe_channel_scale(p).unwrap()`
+/// holds bit-exactly for every non-sentinel quad; the full exponent
+/// range stays finite and nonzero in `f32` (byte `1` ⇒ `2^-135`, a
+/// subnormal; byte `255` ⇒ `2^119`).
+#[inline]
+pub fn rgbe_channel_scale(rgbe: [u8; 4]) -> Option<f32> {
+    let e = rgbe[3];
+    if e == 0 {
+        None
+    } else {
+        // Spec §3 decode formula: f = ldexp(1.0, rgbe[3] - (128 + 8)).
+        Some(ldexp(1.0, e as i32 - 128 - 8))
+    }
+}
+
 /// Decode one shared-exponent pixel. The output array is `[R, G, B]`
 /// in the source colour space (RGB for `32-bit_rle_rgbe` files, CIE
 /// XYZ for `32-bit_rle_xyze`).
@@ -386,6 +435,118 @@ mod tests {
             f32::NAN,
             f32::INFINITY,
         ])));
+    }
+
+    #[test]
+    fn channel_scale_zero_pixel_is_sentinel() {
+        // Spec §3: exponent byte 0 is the "no value" sentinel — there
+        // is no scale factor for a sentinel pixel.
+        assert_eq!(rgbe_channel_scale([0, 0, 0, 0]), None);
+    }
+
+    #[test]
+    fn channel_scale_sentinel_keys_off_exponent_only() {
+        // Mantissas must not influence the sentinel test — only the
+        // exponent byte == 0 marks a no-value pixel per spec §3.
+        assert_eq!(rgbe_channel_scale([255, 255, 255, 0]), None);
+        assert_eq!(rgbe_channel_scale([7, 11, 200, 0]), None);
+    }
+
+    #[test]
+    fn channel_scale_spec_worked_example() {
+        // Spec §3: (R,G,B)=(1.0, 0.5, 0.25) -> bytes (128, 64, 32, 129).
+        // The decode formula f = ldexp(1.0, 129 - (128 + 8)) = 2^-7,
+        // and mantissa * f recovers each channel exactly.
+        let scale = rgbe_channel_scale([128, 64, 32, 129]).expect("non-sentinel");
+        assert_eq!(scale, 0.0078125); // 2^-7, exact in f32
+        assert_eq!(128.0 * scale, 1.0);
+        assert_eq!(64.0 * scale, 0.5);
+        assert_eq!(32.0 * scale, 0.25);
+    }
+
+    #[test]
+    fn channel_scale_boundary_bytes_pin_formula() {
+        // Pin the f = 2^(byte - 136) formula across the byte range:
+        // byte 136 is the unit-scale boundary (mantissa byte == channel
+        // value), byte 1 lands on a subnormal-but-exact power of two,
+        // byte 255 stays finite at 2^119.
+        assert_eq!(rgbe_channel_scale([0, 0, 0, 136]), Some(1.0));
+        assert_eq!(rgbe_channel_scale([0, 0, 0, 135]), Some(0.5));
+        assert_eq!(rgbe_channel_scale([0, 0, 0, 137]), Some(2.0));
+        // Expected powers computed in f64 then narrowed — `f32::powi`
+        // can't reach 2^-135 directly (the 2^135 reciprocal step
+        // overflows f32), but the f64 value narrows to the exact
+        // subnormal.
+        assert_eq!(
+            rgbe_channel_scale([0, 0, 0, 1]),
+            Some((2.0_f64).powi(-135) as f32)
+        );
+        assert_eq!(
+            rgbe_channel_scale([0, 0, 0, 255]),
+            Some((2.0_f64).powi(119) as f32)
+        );
+        // Every non-sentinel scale is finite and strictly positive.
+        for e in 1u8..=255 {
+            let f = rgbe_channel_scale([0, 0, 0, e]).expect("non-sentinel");
+            assert!(f.is_finite() && f > 0.0, "byte {e}: scale {f}");
+        }
+    }
+
+    #[test]
+    fn channel_scale_agrees_with_rgbe_to_rgb_bit_exactly() {
+        // Cross-check against the decode path: for every exponent byte
+        // the factor must reproduce rgbe_to_rgb's channels bit-exactly
+        // (both paths run the same spec-§3 ldexp formula).
+        for e in 0u8..=255 {
+            let p = [200_u8, 100, 50, e];
+            let decoded = rgbe_to_rgb(p);
+            match rgbe_channel_scale(p) {
+                None => assert_eq!(decoded, [0.0, 0.0, 0.0], "sentinel byte {e}"),
+                Some(f) => {
+                    for (i, &m) in p[..3].iter().enumerate() {
+                        assert_eq!(
+                            decoded[i],
+                            m as f32 * f,
+                            "ch {i} byte {e}: decode disagrees with mantissa * scale"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn channel_scale_composes_with_sibling_inspectors() {
+        // Trio invariants for every exponent byte: the sentinel branch
+        // matches rgbe_is_zero_pixel, and on the non-sentinel branch
+        // f == 2^n / 256 with n from rgbe_unbiased_exponent.
+        for e in 0u8..=255 {
+            let p = [128_u8, 64, 32, e];
+            let scale = rgbe_channel_scale(p);
+            assert_eq!(scale.is_none(), rgbe_is_zero_pixel(p), "byte {e}");
+            if let Some(f) = scale {
+                let n = rgbe_unbiased_exponent(p).expect("non-sentinel");
+                // 2^n / 256 computed in f64 then narrowed, mirroring
+                // the ldexp helper — exact for the whole byte range.
+                let expected = (2.0_f64.powi(n) / 256.0) as f32;
+                assert_eq!(f, expected, "byte {e}: f {f} vs 2^{n}/256 {expected}");
+            }
+        }
+    }
+
+    #[test]
+    fn channel_scale_roundtrips_through_encoder() {
+        // After encoding a non-zero RGB triple, mantissa * scale of the
+        // produced quad recovers values within the format's mantissa
+        // quantisation; a black-pixel encode produces the sentinel.
+        let rgbe = rgb_to_rgbe([4.0, 2.0, 1.0]);
+        // 4.0 = 0.5 * 2^3 ⇒ exponent byte 131 ⇒ f = 2^(131-136) = 2^-5.
+        let f = rgbe_channel_scale(rgbe).expect("non-sentinel");
+        assert_eq!(f, 0.03125);
+        assert_eq!(rgbe[0] as f32 * f, 4.0);
+        assert_eq!(rgbe[1] as f32 * f, 2.0);
+        assert_eq!(rgbe[2] as f32 * f, 1.0);
+        assert_eq!(rgbe_channel_scale(rgb_to_rgbe([0.0, 0.0, 0.0])), None);
     }
 
     #[test]
