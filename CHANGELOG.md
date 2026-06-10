@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- Round 275 (spec-conformance — single-`FORMAT` enforcement): the
+  header parser now rejects a picture that carries more than one
+  `FORMAT=` record with an `Invalid` error rather than silently
+  last-wins overwriting it. This enforces the staged spec at
+  `docs/image/hdr/radiance-hdr-rgbe-format.md` §1: "**At most one**
+  `FORMAT` line is allowed; it must be `32-bit_rle_rgbe` or
+  `32-bit_rle_xyze` for a valid Radiance picture." Two distinct
+  pixel-format declarations leave the scanline section ambiguous, so a
+  duplicate is treated as a malformed file (the rule is structural —
+  even two identical `FORMAT=` lines are rejected). Single-`FORMAT`
+  files and headers with no `FORMAT` record (defaulting to RGBE) are
+  unaffected.
+
 ### Added
 
 - Round 269 (spec-compliance — `rgbe_channel_scale` inspector): new

@@ -178,6 +178,11 @@ fn parse_header(input: &[u8], cursor: &mut usize) -> Result<HdrHeader> {
         ));
     }
     let mut header = HdrHeader::default();
+    // Per the format spec, "at most one FORMAT line is allowed". A
+    // second FORMAT record makes the picture invalid rather than the
+    // last-wins overwrite a permissive parser would do — two distinct
+    // pixel-format declarations leave the scanline section ambiguous.
+    let mut format_seen = false;
     loop {
         let line =
             read_line(input, cursor).ok_or_else(|| Error::invalid("HDR: header truncated"))?;
@@ -203,6 +208,10 @@ fn parse_header(input: &[u8], cursor: &mut usize) -> Result<HdrHeader> {
             .map_err(|_| Error::invalid("HDR: non-UTF8 header value"))?;
         match key {
             "FORMAT" => {
+                if format_seen {
+                    return Err(Error::invalid("HDR: at most one FORMAT line is allowed"));
+                }
+                format_seen = true;
                 header.format = match value {
                     "32-bit_rle_rgbe" => HdrFormat::Rgbe,
                     "32-bit_rle_xyze" => HdrFormat::Xyze,
@@ -634,6 +643,38 @@ mod tests {
         let mut cursor = 0usize;
         let header = parse_header(bytes, &mut cursor).unwrap();
         assert_eq!(header.view.as_deref(), Some("rvu -vp 0 0 10"));
+    }
+
+    #[test]
+    fn duplicate_format_record_is_rejected() {
+        // The format spec mandates "at most one FORMAT line". A second
+        // FORMAT record (even with the same value) makes the picture
+        // invalid — the parser must not silently last-wins it.
+        let bytes = b"#?RADIANCE\nFORMAT=32-bit_rle_rgbe\nFORMAT=32-bit_rle_xyze\n\n-Y 1 +X 8\n";
+        let mut cursor = 0usize;
+        let err = parse_header(bytes, &mut cursor).expect_err("two FORMAT lines must error");
+        assert!(
+            err.to_string().contains("at most one FORMAT"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn duplicate_format_record_rejected_even_when_identical() {
+        // Two FORMAT lines with the *same* value are still invalid per
+        // spec — the "at most one" rule is structural, not value-based.
+        let bytes = b"#?RADIANCE\nFORMAT=32-bit_rle_rgbe\nFORMAT=32-bit_rle_rgbe\n\n-Y 1 +X 8\n";
+        let mut cursor = 0usize;
+        assert!(parse_header(bytes, &mut cursor).is_err());
+    }
+
+    #[test]
+    fn single_format_record_is_accepted() {
+        // The duplicate-FORMAT guard must not perturb the happy path.
+        let bytes = b"#?RADIANCE\nFORMAT=32-bit_rle_xyze\n\n-Y 1 +X 8\n";
+        let mut cursor = 0usize;
+        let header = parse_header(bytes, &mut cursor).unwrap();
+        assert_eq!(header.format, HdrFormat::Xyze);
     }
 
     #[test]
