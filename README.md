@@ -120,57 +120,28 @@ let back = encode_hdr(&img).unwrap();
 
 ## Performance
 
-Criterion micro-benchmarks live in [`benches/encode.rs`](benches/encode.rs)
-and exercise the three `RleMode` paths (`New`, `Old`, `Auto`) on three
-representative inline-synthesised inputs. Numbers below were collected
-with `cargo bench --bench encode -- --warm-up-time 1 --measurement-time
-3` on an Apple Silicon laptop (release profile, single-threaded, no
-prefetch tweaks); they are reproducible run-to-run within a few percent
-but should be read as relative throughput between the modes rather
-than absolute platform numbers.
+The full Criterion suite, measured numbers and the ranked hotspot table
+live in [`BENCHMARKS.md`](BENCHMARKS.md). Three bench targets cover the
+crate's hot surface end-to-end:
 
-| Input                                | RLE mode | Median time | Throughput (raw float bytes) |
-|--------------------------------------|---------:|------------:|-----------------------------:|
-| 64×64 solid colour                   | `New`    | 20.4 µs     | 2.24 GiB/s                   |
-| 64×64 solid colour                   | `Old`    | 17.1 µs     | 2.67 GiB/s                   |
-| 64×64 solid colour                   | `Auto`   | 19.8 µs     | 2.31 GiB/s                   |
-| 256×256 deterministic gradient       | `New`    | 356 µs      | 2.06 GiB/s                   |
-| 256×256 deterministic gradient       | `Old`    | 295 µs      | 2.48 GiB/s                   |
-| 256×256 deterministic gradient       | `Auto`   | 359 µs      | 2.04 GiB/s                   |
-| 1024×1024 solid colour (long runs)   | `New`    | 4.99 ms     | 2.35 GiB/s                   |
-| 1024×1024 solid colour (long runs)   | `Old`    | 3.95 ms     | 2.97 GiB/s                   |
-| 1024×1024 solid colour (long runs)   | `Auto`   | 4.98 ms     | 2.36 GiB/s                   |
+* [`benches/encode.rs`](benches/encode.rs) — `encode_hdr_with_rle` in
+  all four modes (`New`, `Old`, `Auto`, `Uncompressed`) on three
+  inline-synthesised inputs.
+* [`benches/decode.rs`](benches/decode.rs) — `parse_hdr` on the same
+  inputs pre-encoded in each of the three on-disk scanline flavours
+  (new-RLE / old-RLE / uncompressed).
+* [`benches/pixels.rs`](benches/pixels.rs) — XYZE↔RGB whole-image
+  conversion (both working spaces) and all 8 tone-mapping operators.
 
-Observations:
-
-* `Auto` tracks `New` within noise on every input, as expected — the
-  three widths (64, 256, 1024) all sit comfortably inside the
-  `8..=32767` new-RLE addressable range, so `Auto` selects `New`.
-* `Old` is consistently the fastest variant in absolute time. The
-  output it produces is also typically larger (no per-scanline `0x02
-  0x02` marker + run-pack), so the fewer-cycles-per-pixel win comes
-  with a wire-size penalty — pick `New` (or `Auto`) for compression,
-  `Old` only when targeting legacy consumers that don't recognise the
-  post-1991 marker.
-* All paths sit in the 2.0–3.0 GiB/s range against the raw `f32` input
-  buffer, dominated by the `f32 → RGBE` shared-exponent conversion and
-  the per-pixel channel-deinterleave into the four single-channel
-  staging buffers `encode_scanline` consumes.
-* Round 179 closed the round-131 follow-up note about
-  `reorient_for_axis_flags`'s unconditional `pixels.to_vec()`:
-  `reorient_for_axis_flags` now returns `Cow<'_, [f32]>` and the
-  canonical `-Y H +X W` axis (the encoder default, no flip / no
-  transpose) is served as `Cow::Borrowed(&image.pixels)` — the
-  ~12 MiB alloc/memcpy per 1024×1024 default-axis encode is gone.
-  Mirrored / transposed headers still pay the allocation since the
-  on-disk layout genuinely differs from the canonical buffer.
-  Repeating the round-131 quick bench against the post-r179 encoder
-  shows the 1024×1024 solid `new_rle` path moving from a
-  median ~4.99 ms (2.35 GiB/s) to a median ~4.70 ms (2.49 GiB/s) on
-  the same Apple Silicon laptop, a ~6% improvement that lands
-  squarely on the alloc-elimination axis (the rgb_to_rgbe loop +
-  the four per-channel staging-buffer fills still dominate the
-  remaining wall time).
+Headlines (Apple Silicon laptop, round 285): both codec directions run
+at 2.1–3.5 GiB/s of float-side pixels in every flavour, dominated by
+the per-pixel shared-exponent conversion rather than wire handling;
+XYZ conversion is memory-bound at ~0.34 ns/px; tone-mapping operators
+range from 3.7 ns/px (`Linear`) to 40.6 ns/px (`Drago`), with the
+`Drago` outlier traced to loop-invariant transcendentals recomputed per
+channel — named in `BENCHMARKS.md` as the next profile-optimisation
+target. Round 179's `reorient_for_axis_flags` `Cow` fast path (no
+alloc/memcpy on the canonical `-Y H +X W` axis) remains in effect.
 
 ## Fuzzing
 

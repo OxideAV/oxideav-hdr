@@ -106,6 +106,14 @@ fn bench_encode(c: &mut Criterion) {
             });
         });
 
+        group.bench_function("uncompressed", |b| {
+            b.iter(|| {
+                let out = encode_hdr_with_rle(black_box(img), RleMode::Uncompressed)
+                    .expect("encode (uncompressed) failed");
+                black_box(out);
+            });
+        });
+
         group.finish();
     }
 }

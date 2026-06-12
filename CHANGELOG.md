@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Round 285 (depth — benchmark suite): the Criterion harness now covers
+  the crate's whole hot surface. `benches/decode.rs` times `parse_hdr`
+  on all three on-disk scanline flavours (new-RLE, old-RLE, and
+  uncompressed via `parse_hdr_with_options` +
+  `FallbackMode::Uncompressed`); `benches/pixels.rs` times the
+  whole-image XYZE↔RGB conversion in both working spaces plus all 8
+  tone-mapping operators; `benches/encode.rs` gains the
+  `RleMode::Uncompressed` flavour alongside `New` / `Old` / `Auto`.
+  Measured numbers and a ranked per-pixel hotspot table land in the new
+  `BENCHMARKS.md`, which names `ToneMap::Drago`'s per-channel
+  recomputation of loop-invariant transcendentals (`log_bias`,
+  `log_max`, `log_max_denom` — constant per image, 40.6 ns/px vs the
+  16.8 ns/px runner-up) as the next profile-optimisation target.
+  Benches and docs only — `src/` is byte-identical to round 275.
+
 ### Changed
 
 - Round 275 (spec-conformance — single-`FORMAT` enforcement): the

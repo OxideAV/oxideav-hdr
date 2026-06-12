@@ -32,10 +32,18 @@ default = ["registry"]
 registry = ["dep:oxideav-core"]
 
 [dev-dependencies]
-# Criterion drives `benches/encode.rs`; bench-only, never pulled into
+# Criterion drives the `benches/` suite; bench-only, never pulled into
 # the runtime dependency closure.
 criterion = "0.5"
 
 [[bench]]
 name = "encode"
+harness = false
+
+[[bench]]
+name = "decode"
+harness = false
+
+[[bench]]
+name = "pixels"
 harness = false
