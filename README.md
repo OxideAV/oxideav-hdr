@@ -15,11 +15,12 @@ takes the same shape and emits a complete file with the canonical
 Clean-room implementation against the published format documentation
 (the published format documentation). No external library source consulted.
 
-## Coverage (round 275)
+## Coverage (round 292)
 
 | Feature                      | Read | Write |
 |------------------------------|:----:|:-----:|
 | `#?RADIANCE` / `#?RGBE` magic|  Y   |   Y (default `#?RADIANCE`; `encode_hdr_with_full_options(_, _, _, MagicLine::Rgbe)` for the legacy spelling) |
+| `#?<identifier>` general magic line (the staged note's `HDRSTR = "#?"` + caller-supplied identifier — `#?RADIANCE` / `#?RGBE` are just the common spellings; any non-empty token after `#?` is a valid header-id line and is preserved verbatim in `HdrHeader::magic_id`) | Y (parsed into `magic_id`; empty `#?` rejected) | Y (`MagicLine::Custom(String)` emits an arbitrary identifier; `encode_hdr_preserving_magic` reproduces the decoded `magic_id` so a decode→encode round-trip keeps the original `#?…` line instead of rewriting it to `#?RADIANCE`) |
 | `KEY=VALUE` header records   |  Y   |   Y   |
 | `FORMAT` declared **at most once** (a second `FORMAT=` record is rejected as invalid per the staged spec's "at most one FORMAT line is allowed", rather than last-wins overwriting an ambiguous pixel-format declaration) | Y (enforced) | Y (single) |
 | `EXPOSURE` / `GAMMA` / `PIXASPECT` / `SOFTWARE` | Y | Y |

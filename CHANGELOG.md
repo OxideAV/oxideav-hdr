@@ -9,6 +9,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Round 292 (general `#?` magic line): the decoder now accepts the full
+  class of header-id lines the staged format note documents — the magic
+  bytes `#?` (`HDRSTR`) followed by any non-empty caller-supplied
+  identifier (`newheader(s)` emits `#?` then `s`), not only the two
+  canonical `#?RADIANCE` / `#?RGBE` spellings. The parsed identifier is
+  preserved verbatim in the new `HdrHeader::magic_id` field (with the
+  `#?` prefix stripped); an empty `#?` line and a first line lacking the
+  `#?` prefix are both still rejected. On the write side, the new
+  `MagicLine::Custom(String)` variant emits an arbitrary identifier, and
+  `encode_hdr_preserving_magic` reproduces the decoded `magic_id` so a
+  decode→encode round-trip keeps the original `#?…` line instead of
+  rewriting every file's identifier to `#?RADIANCE`. `MagicLine` is now
+  `Clone` (no longer `Copy`) to carry the owned `Custom` string. Eleven
+  new unit tests cover identifier capture (LF + CRLF), custom-program
+  acceptance, empty/missing-prefix rejection, byte-identity of
+  `Custom("RADIANCE")` with the named variant, and the
+  preserving-magic round-trip.
+
 - Round 285 (depth — benchmark suite): the Criterion harness now covers
   the crate's whole hot surface. `benches/decode.rs` times `parse_hdr`
   on all three on-disk scanline flavours (new-RLE, old-RLE, and

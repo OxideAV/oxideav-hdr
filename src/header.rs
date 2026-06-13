@@ -178,6 +178,17 @@ impl Primaries {
 /// `Option<…>` so `Default` produces something writable.
 #[derive(Debug, Clone, PartialEq)]
 pub struct HdrHeader {
+    /// The identifier carried on the `#?…` magic line, with the leading
+    /// `#?` stripped — e.g. `"RADIANCE"`, `"RGBE"`, or the name of the
+    /// program that wrote the file. The staged format note documents the
+    /// header magic as the two-byte string `#?` followed by a
+    /// caller-supplied identifier (`newheader(s)` writes `#?` then `s`),
+    /// so any non-empty token after `#?` is a valid magic line — not just
+    /// the two canonical spellings. The decoder preserves whatever it
+    /// read here so a re-encode can reproduce the original identifier
+    /// verbatim; `None` on a `Default` header means "let the encoder pick
+    /// its default identifier".
+    pub magic_id: Option<String>,
     /// `FORMAT=` value. Defaults to [`HdrFormat::Rgbe`].
     pub format: HdrFormat,
     /// `EXPOSURE=` (cumulative; see Radiance docs for the multiplicative
@@ -226,6 +237,7 @@ pub struct HdrHeader {
 impl Default for HdrHeader {
     fn default() -> Self {
         Self {
+            magic_id: None,
             format: HdrFormat::Rgbe,
             exposure: None,
             gamma: None,

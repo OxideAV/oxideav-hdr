@@ -69,7 +69,16 @@ impl LineEnding {
 /// some pre-`#?RADIANCE` writers used and is useful when round-tripping
 /// a file whose original magic line was the alternate spelling, or when
 /// targeting a consumer that only recognises the older identifier.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+///
+/// Beyond those two named spellings, the staged format note documents
+/// the header magic generically: the two-byte string `#?` (`HDRSTR`)
+/// followed by a caller-supplied identifier (`newheader(s)` emits `#?`
+/// then `s`). [`MagicLine::Custom`] reproduces an arbitrary identifier —
+/// e.g. a writer's own program name, or the exact identifier the decoder
+/// parsed into [`crate::HdrHeader::magic_id`] — so a decode→encode
+/// round-trip can preserve the original magic line verbatim instead of
+/// rewriting every file's identifier to `RADIANCE`.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum MagicLine {
     /// `#?RADIANCE` — the canonical identifier described by the staged
     /// spec and emitted by every shipped fixture in the Radiance
@@ -78,13 +87,26 @@ pub enum MagicLine {
     /// `#?RGBE` — the documented equivalent spelling some legacy
     /// writers used.
     Rgbe,
+    /// `#?<identifier>` — an arbitrary identifier emitted verbatim after
+    /// the `#?` magic bytes. The string is the identifier *without* the
+    /// leading `#?` (so `MagicLine::Custom("RADIANCE".into())` produces
+    /// the same first line as [`MagicLine::Radiance`]). Empty / non-ASCII
+    /// identifiers are not the encoder's concern to validate — they round
+    /// trip whatever the caller supplied — but the decoder rejects an
+    /// empty identifier on read, so a faithfully-preserved file always
+    /// carries a non-empty one.
+    Custom(String),
 }
 
 impl MagicLine {
-    fn as_bytes(self) -> &'static [u8] {
+    /// The identifier portion (without the `#?` prefix) this magic line
+    /// emits. Borrowed for the named variants; the stored string for
+    /// [`MagicLine::Custom`].
+    fn identifier(&self) -> &str {
         match self {
-            Self::Radiance => b"#?RADIANCE",
-            Self::Rgbe => b"#?RGBE",
+            Self::Radiance => "RADIANCE",
+            Self::Rgbe => "RGBE",
+            Self::Custom(id) => id,
         }
     }
 }
@@ -336,10 +358,33 @@ pub fn encode_hdr_with_full_options(
         )));
     }
     let mut out = Vec::with_capacity(32 + out_w * out_h * 4);
-    write_header(&mut out, &image.header, line_ending, magic);
+    write_header(&mut out, &image.header, line_ending, &magic);
     write_resolution(&mut out, out_w, out_h, &image.header, line_ending);
     write_pixel_rows(&mut out, out_w, out_h, &oriented, effective_rle)?;
     Ok(out)
+}
+
+/// Encode preserving the magic-line identifier the decoder parsed into
+/// [`HdrHeader::magic_id`](crate::HdrHeader::magic_id), so a
+/// decode→encode round-trip reproduces the original `#?…` line verbatim
+/// rather than rewriting every file's identifier to `#?RADIANCE`.
+///
+/// When `image.header.magic_id` is `Some(id)` the file leads with
+/// `#?<id>`; when it is `None` (a freshly-built [`HdrImage`] that never
+/// came off disk) the encoder falls back to [`MagicLine::Radiance`], the
+/// same default [`encode_hdr_with_options`] uses. The RLE flavour and
+/// line ending are caller-chosen exactly as in
+/// [`encode_hdr_with_options`].
+pub fn encode_hdr_preserving_magic(
+    image: &HdrImage,
+    rle: RleMode,
+    line_ending: LineEnding,
+) -> Result<Vec<u8>> {
+    let magic = match &image.header.magic_id {
+        Some(id) => MagicLine::Custom(id.clone()),
+        None => MagicLine::Radiance,
+    };
+    encode_hdr_with_full_options(image, rle, line_ending, magic)
 }
 
 /// Convenience wrapper that builds an [`HdrImage`] from raw float
@@ -360,9 +405,10 @@ pub fn encode_hdr_rgb96f(
     encode_hdr(&img)
 }
 
-fn write_header(out: &mut Vec<u8>, header: &HdrHeader, eol: LineEnding, magic: MagicLine) {
+fn write_header(out: &mut Vec<u8>, header: &HdrHeader, eol: LineEnding, magic: &MagicLine) {
     let nl = eol.as_bytes();
-    out.extend_from_slice(magic.as_bytes());
+    out.extend_from_slice(b"#?");
+    out.extend_from_slice(magic.identifier().as_bytes());
     out.extend_from_slice(nl);
     out.extend_from_slice(format!("FORMAT={}", header.format.as_str()).as_bytes());
     out.extend_from_slice(nl);
@@ -815,5 +861,78 @@ mod tests {
         assert_eq!(back.header.view.as_deref(), Some("rvu -vp 0 0 5"));
         assert_eq!(back.header.colorcorr, Some([1.1, 1.0, 0.9]));
         assert_eq!(back.header.pixaspect, Some(1.0));
+    }
+
+    #[test]
+    fn custom_magic_emits_arbitrary_identifier() {
+        // `MagicLine::Custom` reproduces the `#?` prefix plus an arbitrary
+        // identifier verbatim, and the result decodes — covering writers
+        // that stamp their own program name in the magic line.
+        let img = pattern(16, 2);
+        let bytes = encode_hdr_with_full_options(
+            &img,
+            RleMode::New,
+            LineEnding::Lf,
+            MagicLine::Custom("MYWRITER 1.2".to_owned()),
+        )
+        .unwrap();
+        assert!(bytes.starts_with(b"#?MYWRITER 1.2\n"));
+        let back = parse_hdr(&bytes).unwrap();
+        assert_eq!(back.header.magic_id.as_deref(), Some("MYWRITER 1.2"));
+    }
+
+    #[test]
+    fn custom_magic_radiance_matches_named_variant() {
+        // `MagicLine::Custom("RADIANCE")` must be byte-identical to the
+        // named `MagicLine::Radiance` — the named variants are just
+        // shorthands for the common identifiers.
+        let img = pattern(16, 2);
+        let named =
+            encode_hdr_with_full_options(&img, RleMode::New, LineEnding::Lf, MagicLine::Radiance)
+                .unwrap();
+        let custom = encode_hdr_with_full_options(
+            &img,
+            RleMode::New,
+            LineEnding::Lf,
+            MagicLine::Custom("RADIANCE".to_owned()),
+        )
+        .unwrap();
+        assert_eq!(named, custom);
+    }
+
+    #[test]
+    fn preserving_magic_round_trips_custom_identifier() {
+        // A file written by some other program carries a non-canonical
+        // identifier. Decode it, then re-encode with
+        // `encode_hdr_preserving_magic`: the original `#?…` line must come
+        // back verbatim rather than being rewritten to `#?RADIANCE`.
+        let original = b"#?SOMEOTHERWRITER v3\nFORMAT=32-bit_rle_rgbe\n\n-Y 2 +X 16\n".to_vec();
+        // Append a flat uncompressed pixel section so the decode succeeds.
+        let mut file = original.clone();
+        file.extend(std::iter::repeat(0u8).take(16 * 2 * 4));
+        let decoded =
+            crate::parse_hdr_with_options(&file, crate::FallbackMode::Uncompressed).unwrap();
+        assert_eq!(
+            decoded.header.magic_id.as_deref(),
+            Some("SOMEOTHERWRITER v3")
+        );
+        let reencoded =
+            encode_hdr_preserving_magic(&decoded, RleMode::Uncompressed, LineEnding::Lf).unwrap();
+        assert!(reencoded.starts_with(b"#?SOMEOTHERWRITER v3\n"));
+        // And the identifier survives a second decode round.
+        let twice =
+            crate::parse_hdr_with_options(&reencoded, crate::FallbackMode::Uncompressed).unwrap();
+        assert_eq!(twice.header.magic_id.as_deref(), Some("SOMEOTHERWRITER v3"));
+    }
+
+    #[test]
+    fn preserving_magic_falls_back_to_radiance_when_unset() {
+        // A freshly-built image that never came off disk has
+        // `magic_id == None`; `encode_hdr_preserving_magic` then emits the
+        // canonical `#?RADIANCE` default.
+        let img = pattern(16, 2);
+        assert!(img.header.magic_id.is_none());
+        let bytes = encode_hdr_preserving_magic(&img, RleMode::New, LineEnding::Lf).unwrap();
+        assert!(bytes.starts_with(b"#?RADIANCE\n"));
     }
 }

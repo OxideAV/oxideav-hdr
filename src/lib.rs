@@ -53,8 +53,8 @@ pub use decoder::{
     parse_hdr, parse_hdr_with_limits, parse_hdr_with_options, parse_hdr_with_options_and_limits,
 };
 pub use encoder::{
-    encode_hdr, encode_hdr_rgb96f, encode_hdr_with_full_options, encode_hdr_with_options,
-    encode_hdr_with_rle, LineEnding, MagicLine, RleMode,
+    encode_hdr, encode_hdr_preserving_magic, encode_hdr_rgb96f, encode_hdr_with_full_options,
+    encode_hdr_with_options, encode_hdr_with_rle, LineEnding, MagicLine, RleMode,
 };
 pub use error::{HdrError, Result};
 pub use header::{AxisSign, HdrFormat, HdrHeader, Primaries};

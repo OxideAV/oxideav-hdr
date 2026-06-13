@@ -169,15 +169,28 @@ pub fn parse_hdr_with_options_and_limits(
 }
 
 fn parse_header(input: &[u8], cursor: &mut usize) -> Result<HdrHeader> {
-    // First line: magic.
+    // First line: magic. The staged format note documents the header
+    // magic as the two-byte string `#?` (`HDRSTR[] = "#?"`) followed by a
+    // caller-supplied identifier — `newheader(s)` writes `#?` then `s`,
+    // and a line is recognised as a header-id line iff it begins with
+    // `#?` (`headidval`). `#?RADIANCE` / `#?RGBE` are the two common
+    // identifiers, but any non-empty token after `#?` is valid (a writer
+    // may stamp its own program name there), so we accept the whole class
+    // and preserve the identifier for a lossless re-encode rather than
+    // hard-rejecting the two canonical spellings only.
     let magic = read_line(input, cursor).ok_or_else(|| Error::invalid("HDR: missing magic"))?;
     let trimmed = trim_cr(magic);
-    if trimmed != b"#?RADIANCE" && trimmed != b"#?RGBE" {
-        return Err(Error::invalid(
-            "HDR: missing #?RADIANCE / #?RGBE magic line",
-        ));
-    }
-    let mut header = HdrHeader::default();
+    let magic_id = trimmed
+        .strip_prefix(b"#?")
+        .filter(|id| !id.is_empty())
+        .ok_or_else(|| Error::invalid("HDR: missing #? magic line"))?;
+    let magic_id = std::str::from_utf8(magic_id)
+        .map_err(|_| Error::invalid("HDR: non-UTF8 #? magic identifier"))?
+        .to_owned();
+    let mut header = HdrHeader {
+        magic_id: Some(magic_id),
+        ..HdrHeader::default()
+    };
     // Per the format spec, "at most one FORMAT line is allowed". A
     // second FORMAT record makes the picture invalid rather than the
     // last-wins overwrite a permissive parser would do — two distinct
@@ -684,6 +697,61 @@ mod tests {
         let mut cursor = 0usize;
         let header = parse_header(bytes, &mut cursor).unwrap();
         assert_eq!(header.exposure, Some(1.5));
+    }
+
+    #[test]
+    fn canonical_magic_identifiers_are_captured() {
+        // The two documented spellings parse into the typed magic_id slot
+        // with the `#?` prefix stripped.
+        let mut cursor = 0usize;
+        let radiance = parse_header(b"#?RADIANCE\n\n-Y 1 +X 8\n", &mut cursor).unwrap();
+        assert_eq!(radiance.magic_id.as_deref(), Some("RADIANCE"));
+        let mut cursor = 0usize;
+        let rgbe = parse_header(b"#?RGBE\n\n-Y 1 +X 8\n", &mut cursor).unwrap();
+        assert_eq!(rgbe.magic_id.as_deref(), Some("RGBE"));
+    }
+
+    #[test]
+    fn custom_program_magic_identifier_is_accepted_and_preserved() {
+        // The staged note documents the magic as `#?` followed by any
+        // caller-supplied identifier (a writer may stamp its program name
+        // there), not just the two canonical spellings. Such a line must
+        // parse, and the identifier must survive verbatim for re-encode.
+        let bytes = b"#?RADIANCE GENERATED-BY oxideav-hdr-test\n\n-Y 1 +X 8\n";
+        let mut cursor = 0usize;
+        let header = parse_header(bytes, &mut cursor).unwrap();
+        assert_eq!(
+            header.magic_id.as_deref(),
+            Some("RADIANCE GENERATED-BY oxideav-hdr-test")
+        );
+    }
+
+    #[test]
+    fn magic_identifier_survives_crlf_line_ending() {
+        // The `#?` detection runs after CR-trimming, so a CRLF-terminated
+        // magic line yields the same identifier as the LF form.
+        let bytes = b"#?MYWRITER\r\n\r\n-Y 1 +X 8\r\n";
+        let mut cursor = 0usize;
+        let header = parse_header(bytes, &mut cursor).unwrap();
+        assert_eq!(header.magic_id.as_deref(), Some("MYWRITER"));
+    }
+
+    #[test]
+    fn empty_magic_identifier_is_rejected() {
+        // `#?` with nothing after it is not a valid header-id line — the
+        // identifier the spec requires after the magic bytes is missing.
+        let bytes = b"#?\n\n-Y 1 +X 8\n";
+        let mut cursor = 0usize;
+        assert!(parse_header(bytes, &mut cursor).is_err());
+    }
+
+    #[test]
+    fn non_magic_first_line_is_rejected() {
+        // A first line lacking the `#?` prefix entirely is not a Radiance
+        // picture.
+        let bytes = b"RADIANCE\n\n-Y 1 +X 8\n";
+        let mut cursor = 0usize;
+        assert!(parse_header(bytes, &mut cursor).is_err());
     }
 
     #[test]
