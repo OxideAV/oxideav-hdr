@@ -24,7 +24,7 @@ cargo-fuzz = true
 #    `4 * width` byte RGBE quads with no sentinels). All three are
 #    reachable from arbitrary fuzz input.
 #
-# Three targets:
+# Four targets:
 #
 #  * `decode`     — feed arbitrary bytes to `parse_hdr` and assert the
 #                   call always *returns* (Result-vs-panic). Default
@@ -47,6 +47,17 @@ cargo-fuzz = true
 #                   `KEY=VALUE` split + the float / chromaticity
 #                   parses + the comment-line handling. The pixel-side
 #                   harness covers the rest of the surface.
+#  * `pixels`     — wrap a fuzz-controlled pixel section in a valid
+#                   container envelope (magic + blank line + a fuzz-
+#                   chosen `-Y H +X W` resolution line with small,
+#                   bounded dimensions), then decode it under *both*
+#                   `FallbackMode` branches. Forces the corpus straight
+#                   into the new-RLE / old-RLE / uncompressed inner
+#                   loops — the run-code grammar `decode` only reaches
+#                   by chance (it has to synthesise the whole envelope
+#                   prefix first) and `roundtrip` never reaches at all
+#                   (it only decodes the encoder's own well-formed
+#                   output).
 #
 # The crate is pulled in with `default-features = false` so the fuzz
 # build exercises the framework-free standalone `parse_hdr` /
@@ -81,5 +92,11 @@ doc = false
 [[bin]]
 name = "headers"
 path = "fuzz_targets/headers.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "pixels"
+path = "fuzz_targets/pixels.rs"
 test = false
 doc = false

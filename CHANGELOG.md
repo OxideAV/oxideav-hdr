@@ -9,6 +9,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Round 299 (depth — fuzzing): a fourth `cargo-fuzz` target `pixels`
+  under `fuzz/fuzz_targets/pixels.rs`. It wraps a *fuzz-controlled pixel
+  section* in a valid container envelope (magic + blank-line terminator
+  + a fuzz-chosen `-Y H +X W` resolution line with small, bounded
+  dimensions derived from two fuzz bytes), then decodes the result under
+  **both** `FallbackMode` branches (`OldRle` + `Uncompressed`). This
+  drives the corpus straight into the new-RLE / old-RLE / uncompressed
+  scanline inner loops — the run-code grammar the existing `decode`
+  target reaches only by chance (it must first synthesise the whole
+  magic + blank-line + resolution-line prefix from random bytes) and the
+  `roundtrip` target never reaches at all (it only ever decodes the
+  encoder's own well-formed output). A 3.1 M-run session (91 s on Apple
+  Silicon, default `HdrLimits`, ASan) surfaced no panics, integer
+  overflows, out-of-bounds reads, or over-allocations; no `src/` changes
+  were required. The libFuzzer dictionary recovered the `0x02 0x02`
+  new-RLE marker and `(1,1,1,*)` old-RLE sentinel shapes, confirming the
+  inner loops are exercised. Standalone `default-features = false` build
+  like the other three targets, so it never links `oxideav-core`.
+
 - Round 292 (general `#?` magic line): the decoder now accepts the full
   class of header-id lines the staged format note documents — the magic
   bytes `#?` (`HDRSTR`) followed by any non-empty caller-supplied

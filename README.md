@@ -146,24 +146,25 @@ alloc/memcpy on the canonical `-Y H +X W` axis) remains in effect.
 
 ## Fuzzing
 
-Round 202 added a `cargo-fuzz` harness under [`fuzz/`](fuzz/) with three
-libFuzzer targets covering the public decode + encode surface end-to-end.
-The harness uses the standalone (`default-features = false`) build so it
-never links `oxideav-core` — the targets exercise only the
-framework-free `parse_hdr` / `encode_hdr` path that downstream
-image-library consumers actually call.
+Round 202 added a `cargo-fuzz` harness under [`fuzz/`](fuzz/); round 299
+brings it to four libFuzzer targets covering the public decode + encode
+surface end-to-end. The harness uses the standalone
+(`default-features = false`) build so it never links `oxideav-core` —
+the targets exercise only the framework-free `parse_hdr` / `encode_hdr`
+path that downstream image-library consumers actually call.
 
 | Target       | What it stresses                                                                                 |
 |--------------|--------------------------------------------------------------------------------------------------|
-| `decode`     | `parse_hdr(arbitrary bytes)` — every code path the decoder can take on hostile input. The new round-202 `HdrLimits` default (max 32 767 × 32 767, ≤ 256 MiB pixel buffer) caps the worst-case allocation so libFuzzer doesn't OOM. |
+| `decode`     | `parse_hdr(arbitrary bytes)` — every code path the decoder can take on hostile input. The round-202 `HdrLimits` default (max 32 767 × 32 767, ≤ 256 MiB pixel buffer) caps the worst-case allocation so libFuzzer doesn't OOM. |
 | `roundtrip`  | Synthesise a fuzz-driven small picture, run `encode_hdr` → `parse_hdr`, assert structure survives end-to-end. Catches encoder/decoder asymmetries. |
 | `headers`    | Prepend a valid `#?RADIANCE\n` magic and a minimal `-Y 1 +X 8\n` resolution line so libFuzzer's coverage gradient focuses the corpus on the text `KEY=VALUE` parse (EXPOSURE / COLORCORR / PRIMARIES floats, comment lines, mid-line `=`). |
+| `pixels`     | Round 299: wrap a *fuzz-controlled pixel section* in a valid container envelope (magic + blank line + a fuzz-chosen `-Y H +X W` resolution line with small, bounded dimensions), then decode it under **both** `FallbackMode` branches. Forces the corpus straight into the new-RLE / old-RLE / uncompressed inner loops — the run-code grammar `decode` only reaches by chance (it has to synthesise the whole envelope prefix first) and `roundtrip` never reaches at all (it only decodes the encoder's own well-formed output). A 3.1 M-run session (91 s, Apple Silicon) surfaced no panics. |
 
 Run any target with:
 
 ```sh
 cd fuzz
-cargo +nightly fuzz run decode      # or roundtrip / headers
+cargo +nightly fuzz run decode      # or roundtrip / headers / pixels
 ```
 
 The harness is `cargo-fuzz` standard layout — `fuzz/Cargo.toml` declares
