@@ -926,6 +926,47 @@ mod tests {
     }
 
     #[test]
+    fn set_orientation_drives_every_named_form_end_to_end() {
+        use crate::header::Orientation;
+        // A non-square, content-asymmetric image so a stray transpose or
+        // mirror bug can't masquerade as a pass. Width 8 keeps the
+        // new-RLE path live for the Y-first forms; the X-first forms make
+        // the on-disk scanline width = height = 4 (also in range).
+        let img = pattern(8, 4);
+        let all = [
+            Orientation::Standard,
+            Orientation::FlipX,
+            Orientation::Rotate180,
+            Orientation::FlipY,
+            Orientation::Rotate90Cw,
+            Orientation::Rotate90CwFlipY,
+            Orientation::Rotate90Ccw,
+            Orientation::Rotate90CcwFlipY,
+        ];
+        for o in all {
+            let mut oriented = img.clone();
+            oriented.header.set_orientation(o);
+            // Auto picks new-RLE when the on-disk scanline width is in
+            // range (8 for Y-first, 4 for X-first → old-RLE), so the
+            // encoder never errors on the narrow transposed scanline.
+            let bytes = encode_hdr_with_rle(&oriented, RleMode::Auto).unwrap();
+            let back = parse_hdr(&bytes).unwrap();
+            // Decoder always returns the canonical top-down (y, x)
+            // buffer regardless of on-disk orientation, so the recovered
+            // image must match the original canonical buffer for every
+            // orientation.
+            assert_eq!(back.width, img.width, "{o:?}: width");
+            assert_eq!(back.height, img.height, "{o:?}: height");
+            assert_eq!(back.header.orientation(), o, "{o:?}: orientation slot");
+            for i in 0..img.pixels.len() {
+                let a = img.pixels[i];
+                let b = back.pixels[i];
+                assert!((a - b).abs() < 0.02, "{o:?}: pixel {i}: {a} vs {b}",);
+            }
+        }
+    }
+
+    #[test]
     fn preserving_magic_falls_back_to_radiance_when_unset() {
         // A freshly-built image that never came off disk has
         // `magic_id == None`; `encode_hdr_preserving_magic` then emits the

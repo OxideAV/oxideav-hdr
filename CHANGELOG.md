@@ -9,6 +9,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Round 305: a named `Orientation` enum capturing all eight legal
+  Radiance resolution-string forms from the format note's §2 table
+  (`Standard` = `-Y N +X M`, `FlipX`, `Rotate180`, `FlipY`,
+  `Rotate90Cw`, `Rotate90CwFlipY`, `Rotate90Ccw`, `Rotate90CcwFlipY`).
+  `Orientation::from_axis_fields` / `to_axis_fields` convert losslessly
+  to/from the `HdrHeader`'s low-level `(y_sign, x_sign, x_first)` triple
+  (proven a total mutual inverse over all `2 × 2 × 2` combinations);
+  `is_x_first` and `resolution_template` expose the X-first flag and the
+  printf-style template string. `HdrHeader::orientation` /
+  `set_orientation` let callers read or set the on-disk scanline layout
+  by geometric name rather than by re-deriving it from the raw flags;
+  the encoder's existing axis-flag machinery drives the actual wire
+  format, so a canonical top-down buffer round-trips through any of the
+  eight orientations back to the same `(y, x)` layout (covered by a new
+  asymmetric 8×4 end-to-end encoder test plus six header-level unit
+  tests). `Orientation` is re-exported at the crate root.
+
 - Round 299 (depth — fuzzing): a fourth `cargo-fuzz` target `pixels`
   under `fuzz/fuzz_targets/pixels.rs`. It wraps a *fuzz-controlled pixel
   section* in a valid container envelope (magic + blank-line terminator

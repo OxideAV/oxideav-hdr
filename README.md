@@ -15,7 +15,7 @@ takes the same shape and emits a complete file with the canonical
 Clean-room implementation against the published format documentation
 (the published format documentation). No external library source consulted.
 
-## Coverage (round 292)
+## Coverage (round 305)
 
 | Feature                      | Read | Write |
 |------------------------------|:----:|:-----:|
@@ -33,6 +33,7 @@ Clean-room implementation against the published format documentation
 | `PRIMARIES` (8-float chromaticity) | Y |   Y   |
 | `HdrImage::effective_primaries` (header value or reference-manual default `0.640 0.330 0.290 0.600 0.150 0.060 1/3 1/3` (default origin primaries) with equal-energy white) | helper | n/a |
 | All 8 axis-flag combinations |  Y   |  Y (Y-first + X-first transpose) |
+| `Orientation` enum naming all 8 resolution-string forms (`Standard` = `-Y N +X M`, `FlipX`, `Rotate180`, `FlipY`, `Rotate90Cw`, `Rotate90CwFlipY`, `Rotate90Ccw`, `Rotate90CcwFlipY` per the format note's §2 table) with `from_axis_fields` / `to_axis_fields` (a total mutual inverse over the `(y_sign, x_sign, x_first)` triple), `is_x_first`, `resolution_template`, plus `HdrHeader::orientation` / `set_orientation` to read or set the on-disk scanline layout by geometric name | helper | helper |
 | 32-bit_rle_rgbe pixels       |  Y   |   Y   |
 | `rgbe_unbiased_exponent([u8; 4]) -> Option<i32>` (returns the spec-§3 `byte - 128` shared exponent, or `None` for the all-zero sentinel pixel — `Some(1)` for the spec-canonical worked example `(128, 64, 32, 129)`) | inspector | n/a |
 | `rgbe_is_zero_pixel([u8; 4]) -> bool` (`bool`-returning sentinel inspector keying off `rgbe[3] == 0` per spec §3's "no valid pixel with exponent byte 0" rule — the boolean counterpart to `rgbe_unbiased_exponent` for call sites that don't need the exponent value) | inspector | n/a |

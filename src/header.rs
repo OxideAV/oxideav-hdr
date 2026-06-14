@@ -77,6 +77,135 @@ impl AxisSign {
     }
 }
 
+/// The eight named geometric orientations a Radiance resolution line
+/// can encode, relative to the format's fixed standard coordinate
+/// system (origin at the lower-left, X increasing right, Y increasing
+/// up).
+///
+/// The resolution line lists two axis flags; the *first* axis listed is
+/// the major / outer sort and a `-` sign means that axis is *decreasing*
+/// through the file. The format note (`docs/image/hdr/`, §2 "Resolution
+/// string") enumerates eight legal forms and names the geometric
+/// transform each one applies to the standard orientation:
+///
+/// | Resolution string | Variant                         |
+/// |-------------------|---------------------------------|
+/// | `-Y N +X M`       | [`Orientation::Standard`]        |
+/// | `-Y N -X M`       | [`Orientation::FlipX`]           |
+/// | `+Y N -X M`       | [`Orientation::Rotate180`]       |
+/// | `+Y N +X M`       | [`Orientation::FlipY`]           |
+/// | `+X M +Y N`       | [`Orientation::Rotate90Cw`]      |
+/// | `-X M +Y N`       | [`Orientation::Rotate90CwFlipY`] |
+/// | `-X M -Y N`       | [`Orientation::Rotate90Ccw`]     |
+/// | `+X M -Y N`       | [`Orientation::Rotate90CcwFlipY`]|
+///
+/// The variant captures exactly the same information as the
+/// [`HdrHeader`]'s three low-level fields (`y_sign`, `x_sign`,
+/// `x_first`); [`Orientation::from_axis_fields`] and
+/// [`Orientation::to_axis_fields`] convert losslessly between the two
+/// representations, so callers can reason about a decoded picture's
+/// scanline layout by name rather than by re-deriving it from the raw
+/// flags.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Orientation {
+    /// `-Y N +X M` — the standard orientation produced by the
+    /// renderers: scanlines run from the upper-left across to the
+    /// upper-right, then down the picture. Y-major, Y decreasing,
+    /// X increasing.
+    Standard,
+    /// `-Y N -X M` — X reversed; the image is flipped left↔right from
+    /// the standard orientation.
+    FlipX,
+    /// `+Y N -X M` — flipped left↔right *and* top↔bottom, i.e. rotated
+    /// 180° from the standard orientation.
+    Rotate180,
+    /// `+Y N +X M` — flipped top↔bottom from the standard orientation.
+    FlipY,
+    /// `+X M +Y N` — rotated 90° clockwise from the standard
+    /// orientation. X-major (each on-disk scanline is one column).
+    Rotate90Cw,
+    /// `-X M +Y N` — rotated 90° clockwise, then flipped top↔bottom.
+    Rotate90CwFlipY,
+    /// `-X M -Y N` — rotated 90° counter-clockwise from the standard
+    /// orientation.
+    Rotate90Ccw,
+    /// `+X M -Y N` — rotated 90° counter-clockwise, then flipped
+    /// top↔bottom.
+    Rotate90CcwFlipY,
+}
+
+impl Orientation {
+    /// Map the [`HdrHeader`]'s three low-level axis fields onto the named
+    /// orientation they encode. Total over all `2 × 2 × 2` combinations
+    /// — every `(y_sign, x_sign, x_first)` triple corresponds to exactly
+    /// one of the eight legal resolution strings.
+    pub fn from_axis_fields(y_sign: AxisSign, x_sign: AxisSign, x_first: bool) -> Self {
+        use AxisSign::{Decreasing, Increasing};
+        match (x_first, y_sign, x_sign) {
+            // Y-first forms (`±Y H ±X W`).
+            (false, Decreasing, Increasing) => Self::Standard,
+            (false, Decreasing, Decreasing) => Self::FlipX,
+            (false, Increasing, Decreasing) => Self::Rotate180,
+            (false, Increasing, Increasing) => Self::FlipY,
+            // X-first forms (`±X W ±Y H`).
+            (true, Increasing, Increasing) => Self::Rotate90Cw,
+            (true, Increasing, Decreasing) => Self::Rotate90CwFlipY,
+            (true, Decreasing, Decreasing) => Self::Rotate90Ccw,
+            (true, Decreasing, Increasing) => Self::Rotate90CcwFlipY,
+        }
+    }
+
+    /// Decompose the named orientation into the `(y_sign, x_sign,
+    /// x_first)` triple the [`HdrHeader`] stores. The exact inverse of
+    /// [`Orientation::from_axis_fields`].
+    pub fn to_axis_fields(self) -> (AxisSign, AxisSign, bool) {
+        use AxisSign::{Decreasing, Increasing};
+        match self {
+            Self::Standard => (Decreasing, Increasing, false),
+            Self::FlipX => (Decreasing, Decreasing, false),
+            Self::Rotate180 => (Increasing, Decreasing, false),
+            Self::FlipY => (Increasing, Increasing, false),
+            Self::Rotate90Cw => (Increasing, Increasing, true),
+            Self::Rotate90CwFlipY => (Increasing, Decreasing, true),
+            Self::Rotate90Ccw => (Decreasing, Decreasing, true),
+            Self::Rotate90CcwFlipY => (Decreasing, Increasing, true),
+        }
+    }
+
+    /// `true` when this orientation lists the X axis before the Y axis
+    /// (`±X W ±Y H`), i.e. each on-disk scanline holds one column's
+    /// worth of samples rather than one row's. The four 90°-rotation
+    /// variants are X-first; the four 0°/180°/mirror variants are
+    /// Y-first.
+    pub fn is_x_first(self) -> bool {
+        self.to_axis_fields().2
+    }
+
+    /// Render the resolution-line template for this orientation as the
+    /// printf-style string the format note uses, with `%d` placeholders
+    /// for the two dimension values in on-disk order. The standard form
+    /// is `"-Y %d +X %d"`.
+    ///
+    /// The placeholders are in *resolution-line* order: for the Y-first
+    /// variants that's `<Y-flag> H <X-flag> W`; for the X-first variants
+    /// it's `<X-flag> W <Y-flag> H`. See
+    /// [`HdrHeader::resolution_line`](crate::HdrHeader) — the encoder's
+    /// `write_resolution` substitutes the real dimensions into exactly
+    /// this layout.
+    pub fn resolution_template(self) -> &'static str {
+        match self {
+            Self::Standard => "-Y %d +X %d",
+            Self::FlipX => "-Y %d -X %d",
+            Self::Rotate180 => "+Y %d -X %d",
+            Self::FlipY => "+Y %d +X %d",
+            Self::Rotate90Cw => "+X %d +Y %d",
+            Self::Rotate90CwFlipY => "-X %d +Y %d",
+            Self::Rotate90Ccw => "-X %d -Y %d",
+            Self::Rotate90CcwFlipY => "+X %d -Y %d",
+        }
+    }
+}
+
 /// CIE chromaticity coordinates carried in a `PRIMARIES=` record.
 ///
 /// Radiance's `PRIMARIES` header tag is eight space-separated floats:
@@ -255,9 +384,191 @@ impl Default for HdrHeader {
     }
 }
 
+impl HdrHeader {
+    /// The named [`Orientation`] this header's resolution-line axis
+    /// fields encode. A convenience over reading `y_sign` / `x_sign` /
+    /// `x_first` directly; lets a caller branch on the geometric meaning
+    /// (`Orientation::Standard`, `Orientation::Rotate90Cw`, …) without
+    /// re-deriving it from the raw flags.
+    pub fn orientation(&self) -> Orientation {
+        Orientation::from_axis_fields(self.y_sign, self.x_sign, self.x_first)
+    }
+
+    /// Set the resolution-line axis fields from a named [`Orientation`].
+    /// Writes `y_sign`, `x_sign` and `x_first` to the triple the
+    /// orientation decomposes into; the encoder then emits the matching
+    /// resolution line. The inverse of [`HdrHeader::orientation`].
+    ///
+    /// Note this changes only the on-disk scanline *ordering* the
+    /// encoder will write — it does not reorder the canonical top-down
+    /// `(y, x)` pixel buffer in [`crate::HdrImage`]. The encoder applies
+    /// the geometric transform implied by these fields on its way out,
+    /// and the decoder undoes it on the way back, so a buffer encoded
+    /// under any orientation round-trips to the same canonical layout.
+    pub fn set_orientation(&mut self, orientation: Orientation) {
+        let (y_sign, x_sign, x_first) = orientation.to_axis_fields();
+        self.y_sign = y_sign;
+        self.x_sign = x_sign;
+        self.x_first = x_first;
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn orientation_axis_fields_round_trip_over_all_eight_forms() {
+        // Every (y_sign, x_sign, x_first) triple maps to exactly one
+        // Orientation and back. Walk all 2×2×2 combinations and assert
+        // `to_axis_fields(from_axis_fields(t)) == t` — i.e. the two
+        // conversions are mutual inverses and the mapping is total.
+        use AxisSign::{Decreasing, Increasing};
+        for &y in &[Decreasing, Increasing] {
+            for &x in &[Decreasing, Increasing] {
+                for &xf in &[false, true] {
+                    let o = Orientation::from_axis_fields(y, x, xf);
+                    assert_eq!(
+                        o.to_axis_fields(),
+                        (y, x, xf),
+                        "round-trip failed for y={y:?} x={x:?} x_first={xf}",
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn orientation_all_eight_variants_are_distinct() {
+        // The eight legal resolution strings must each name a different
+        // orientation — no two triples collapse to the same variant.
+        use std::collections::HashSet;
+        use AxisSign::{Decreasing, Increasing};
+        let mut seen = HashSet::new();
+        for &y in &[Decreasing, Increasing] {
+            for &x in &[Decreasing, Increasing] {
+                for &xf in &[false, true] {
+                    seen.insert(Orientation::from_axis_fields(y, x, xf));
+                }
+            }
+        }
+        assert_eq!(
+            seen.len(),
+            8,
+            "expected 8 distinct orientations, got {}",
+            seen.len()
+        );
+    }
+
+    #[test]
+    fn orientation_named_forms_match_spec_table() {
+        // Pin each named variant to the exact axis-field triple the
+        // format note's §2 resolution-string table assigns it.
+        use AxisSign::{Decreasing, Increasing};
+        // -Y N +X M  — Standard.
+        assert_eq!(
+            Orientation::Standard.to_axis_fields(),
+            (Decreasing, Increasing, false)
+        );
+        // -Y N -X M  — flipped left↔right.
+        assert_eq!(
+            Orientation::FlipX.to_axis_fields(),
+            (Decreasing, Decreasing, false)
+        );
+        // +Y N -X M  — rotated 180°.
+        assert_eq!(
+            Orientation::Rotate180.to_axis_fields(),
+            (Increasing, Decreasing, false)
+        );
+        // +Y N +X M  — flipped top↔bottom.
+        assert_eq!(
+            Orientation::FlipY.to_axis_fields(),
+            (Increasing, Increasing, false)
+        );
+        // +X M +Y N  — rotated 90° clockwise.
+        assert_eq!(
+            Orientation::Rotate90Cw.to_axis_fields(),
+            (Increasing, Increasing, true)
+        );
+        // -X M +Y N  — rotated 90° CW then flipped top↔bottom.
+        assert_eq!(
+            Orientation::Rotate90CwFlipY.to_axis_fields(),
+            (Increasing, Decreasing, true)
+        );
+        // -X M -Y N  — rotated 90° counter-clockwise.
+        assert_eq!(
+            Orientation::Rotate90Ccw.to_axis_fields(),
+            (Decreasing, Decreasing, true)
+        );
+        // +X M -Y N  — rotated 90° CCW then flipped top↔bottom.
+        assert_eq!(
+            Orientation::Rotate90CcwFlipY.to_axis_fields(),
+            (Decreasing, Increasing, true)
+        );
+    }
+
+    #[test]
+    fn orientation_resolution_templates_match_spec_strings() {
+        assert_eq!(Orientation::Standard.resolution_template(), "-Y %d +X %d");
+        assert_eq!(Orientation::FlipX.resolution_template(), "-Y %d -X %d");
+        assert_eq!(Orientation::Rotate180.resolution_template(), "+Y %d -X %d");
+        assert_eq!(Orientation::FlipY.resolution_template(), "+Y %d +X %d");
+        assert_eq!(Orientation::Rotate90Cw.resolution_template(), "+X %d +Y %d");
+        assert_eq!(
+            Orientation::Rotate90CwFlipY.resolution_template(),
+            "-X %d +Y %d"
+        );
+        assert_eq!(
+            Orientation::Rotate90Ccw.resolution_template(),
+            "-X %d -Y %d"
+        );
+        assert_eq!(
+            Orientation::Rotate90CcwFlipY.resolution_template(),
+            "+X %d -Y %d"
+        );
+    }
+
+    #[test]
+    fn orientation_is_x_first_flags_rotation_variants() {
+        // The four 90°-rotation variants are X-first; the four
+        // mirror/180° variants are Y-first.
+        assert!(!Orientation::Standard.is_x_first());
+        assert!(!Orientation::FlipX.is_x_first());
+        assert!(!Orientation::Rotate180.is_x_first());
+        assert!(!Orientation::FlipY.is_x_first());
+        assert!(Orientation::Rotate90Cw.is_x_first());
+        assert!(Orientation::Rotate90CwFlipY.is_x_first());
+        assert!(Orientation::Rotate90Ccw.is_x_first());
+        assert!(Orientation::Rotate90CcwFlipY.is_x_first());
+    }
+
+    #[test]
+    fn header_orientation_round_trips_via_setter() {
+        // `set_orientation` then `orientation` must reproduce the named
+        // variant for every one of the eight forms.
+        let all = [
+            Orientation::Standard,
+            Orientation::FlipX,
+            Orientation::Rotate180,
+            Orientation::FlipY,
+            Orientation::Rotate90Cw,
+            Orientation::Rotate90CwFlipY,
+            Orientation::Rotate90Ccw,
+            Orientation::Rotate90CcwFlipY,
+        ];
+        for o in all {
+            let mut h = HdrHeader::default();
+            h.set_orientation(o);
+            assert_eq!(h.orientation(), o);
+        }
+    }
+
+    #[test]
+    fn default_header_orientation_is_standard() {
+        // The `Default` header is the canonical `-Y H +X W` layout, which
+        // names `Orientation::Standard`.
+        assert_eq!(HdrHeader::default().orientation(), Orientation::Standard);
+    }
 
     #[test]
     fn primaries_record_string_roundtrips() {
