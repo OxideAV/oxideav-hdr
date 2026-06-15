@@ -3,19 +3,18 @@
 Pure-Rust Radiance RGBE (`.hdr` / `.pic`) reader + writer for the
 [oxideav](https://github.com/OxideAV/oxideav-workspace) workspace.
 
-the shared-exponent floating-point image format, originally
-described in *Real Pixels* (Graphics Gems II, 1991) and implemented
-across the Radiance synthetic-imaging system. The on-disk
-representation packs three 8-bit RGB mantissa bytes plus one shared
-8-bit biased exponent into 4 bytes per pixel, then RLE-codes each
-scanline. The decoder produces packed `f32` RGB triples; the encoder
-takes the same shape and emits a complete file with the canonical
-`-Y H +X W` axis flags.
+Radiance RGBE is the shared-exponent floating-point image format,
+originally described in *Real Pixels* (Graphics Gems II, 1991). The
+on-disk representation packs three 8-bit RGB mantissa bytes plus one
+shared 8-bit biased exponent into 4 bytes per pixel, then RLE-codes
+each scanline. The decoder produces packed `f32` RGB triples; the
+encoder takes the same shape and emits a complete file with the
+canonical `-Y H +X W` axis flags.
 
-Clean-room implementation against the published format documentation
-(the published format documentation). No external library source consulted.
+Clean-room implementation against the published format documentation.
+No external library source consulted.
 
-## Coverage (round 310)
+## Coverage
 
 | Feature                      | Read | Write |
 |------------------------------|:----:|:-----:|
@@ -57,32 +56,22 @@ Clean-room implementation against the published format documentation
 | Tone-mapping (Linear / Gamma / Reinhard / ReinhardExtended / ReinhardLuminance / Hable / Drago / ACES) | - | helpers |
 | Radiance photometric luminance (`179 * (0.265 R + 0.670 G + 0.065 B)` for RGBE; `179 * Y` for XYZE) | helper (`luminance_lm_per_sr_per_m2`, `HdrImage::luminance_buffer`) | n/a |
 
-Cross-validated against ImageMagick 7's HDR codec (encoder output is
-decodable by `magick`, ImageMagick-written `.hdr` files round-trip
-through our decoder, XYZE↔RGB matrix tracks ImageMagick's chroma
-adaptation within the format's shared-exponent precision).
+An opt-in, env-gated test suite cross-validates encode/decode against
+an external Radiance-capable image tool when one is present on `PATH`
+(black-box validator only; it skips cleanly when absent).
 
-Round 192 also stages three committed on-disk regression fixtures
-under [`tests/fixtures/`](tests/fixtures/) (`gradient_32x16_newrle.hdr`,
-`solid_16x8_oldrle.hdr`, `gradient_32x16_crlf_plusY.hdr`), and round
-196 adds a fourth (`flat_4x2_uncompressed.hdr`) that pins the third
-on-disk scanline flavour from the staged spec: 4 × 2 pixels written
-as a flat `4 * width` byte RGBE quad array with no marker and no
-sentinels, paired with the new `RleMode::Uncompressed` writer + the
-`FallbackMode::Uncompressed` reader option. Between them they exercise
-every typed `KEY=VALUE` slot the decoder recognises plus an untyped
-extra record, both `\n` and `\r\n` line endings, the canonical
-`-Y H +X W` and the non-default `+Y H +X W` axis orders, and all
-three pixel-section encodings the staged spec enumerates (new-RLE,
-old-RLE, uncompressed). The matching `tests/fixture_decode.rs` integration test
-decodes each one, asserts the recovered structure, and re-encodes it
-with byte-identity against the committed file — drift in either
-direction is caught by a file-level diff rather than a subtle
-pixel-comparison regression. The uncompressed fixture's pixel
-section is asserted to be exactly `4 * W * H` bytes (no marker, no
-sentinels), confirming the encoder honours the requested flavour at
-the on-disk byte level. Regenerate after an intentional wire-format
-change with `cargo run --example gen_fixtures`.
+Committed on-disk regression fixtures live under
+[`tests/fixtures/`](tests/fixtures/) (`gradient_32x16_newrle.hdr`,
+`solid_16x8_oldrle.hdr`, `gradient_32x16_crlf_plusY.hdr`,
+`flat_4x2_uncompressed.hdr`). Between them they exercise every typed
+`KEY=VALUE` slot the decoder recognises plus an untyped extra record,
+both `\n` and `\r\n` line endings, the canonical `-Y H +X W` and the
+non-default `+Y H +X W` axis orders, and all three pixel-section
+encodings the spec enumerates (new-RLE, old-RLE, uncompressed). The
+matching `tests/fixture_decode.rs` integration test decodes each one,
+asserts the recovered structure, and re-encodes it with byte-identity
+against the committed file. Regenerate after an intentional
+wire-format change with `cargo run --example gen_fixtures`.
 
 ## Standalone vs registry-integrated
 
@@ -136,31 +125,29 @@ crate's hot surface end-to-end:
 * [`benches/pixels.rs`](benches/pixels.rs) — XYZE↔RGB whole-image
   conversion (both working spaces) and all 8 tone-mapping operators.
 
-Headlines (Apple Silicon laptop, round 285): both codec directions run
-at 2.1–3.5 GiB/s of float-side pixels in every flavour, dominated by
-the per-pixel shared-exponent conversion rather than wire handling;
-XYZ conversion is memory-bound at ~0.34 ns/px; tone-mapping operators
-range from 3.7 ns/px (`Linear`) to 40.6 ns/px (`Drago`), with the
-`Drago` outlier traced to loop-invariant transcendentals recomputed per
-channel — named in `BENCHMARKS.md` as the next profile-optimisation
-target. Round 179's `reorient_for_axis_flags` `Cow` fast path (no
-alloc/memcpy on the canonical `-Y H +X W` axis) remains in effect.
+Headlines (Apple Silicon laptop): both codec directions run at
+2.1–3.5 GiB/s of float-side pixels in every flavour, dominated by the
+per-pixel shared-exponent conversion rather than wire handling; XYZ
+conversion is memory-bound at ~0.34 ns/px; tone-mapping operators
+range from 3.7 ns/px (`Linear`) to 40.6 ns/px (`Drago`). The
+`reorient_for_axis_flags` `Cow` fast path avoids any alloc/memcpy on
+the canonical `-Y H +X W` axis.
 
 ## Fuzzing
 
-Round 202 added a `cargo-fuzz` harness under [`fuzz/`](fuzz/); round 299
-brings it to four libFuzzer targets covering the public decode + encode
-surface end-to-end. The harness uses the standalone
-(`default-features = false`) build so it never links `oxideav-core` —
-the targets exercise only the framework-free `parse_hdr` / `encode_hdr`
-path that downstream image-library consumers actually call.
+A `cargo-fuzz` harness under [`fuzz/`](fuzz/) ships four libFuzzer
+targets covering the public decode + encode surface end-to-end. The
+harness uses the standalone (`default-features = false`) build so it
+never links `oxideav-core` — the targets exercise only the
+framework-free `parse_hdr` / `encode_hdr` path that downstream
+image-library consumers actually call.
 
 | Target       | What it stresses                                                                                 |
 |--------------|--------------------------------------------------------------------------------------------------|
-| `decode`     | `parse_hdr(arbitrary bytes)` — every code path the decoder can take on hostile input. The round-202 `HdrLimits` default (max 32 767 × 32 767, ≤ 256 MiB pixel buffer) caps the worst-case allocation so libFuzzer doesn't OOM. |
+| `decode`     | `parse_hdr(arbitrary bytes)` — every code path the decoder can take on hostile input. The `HdrLimits` default (max 32 767 × 32 767, ≤ 256 MiB pixel buffer) caps the worst-case allocation so libFuzzer doesn't OOM. |
 | `roundtrip`  | Synthesise a fuzz-driven small picture, run `encode_hdr` → `parse_hdr`, assert structure survives end-to-end. Catches encoder/decoder asymmetries. |
 | `headers`    | Prepend a valid `#?RADIANCE\n` magic and a minimal `-Y 1 +X 8\n` resolution line so libFuzzer's coverage gradient focuses the corpus on the text `KEY=VALUE` parse (EXPOSURE / COLORCORR / PRIMARIES floats, comment lines, mid-line `=`). |
-| `pixels`     | Round 299: wrap a *fuzz-controlled pixel section* in a valid container envelope (magic + blank line + a fuzz-chosen `-Y H +X W` resolution line with small, bounded dimensions), then decode it under **both** `FallbackMode` branches. Forces the corpus straight into the new-RLE / old-RLE / uncompressed inner loops — the run-code grammar `decode` only reaches by chance (it has to synthesise the whole envelope prefix first) and `roundtrip` never reaches at all (it only decodes the encoder's own well-formed output). A 3.1 M-run session (91 s, Apple Silicon) surfaced no panics. |
+| `pixels`     | Wrap a *fuzz-controlled pixel section* in a valid container envelope (magic + blank line + a fuzz-chosen `-Y H +X W` resolution line with small, bounded dimensions), then decode it under **both** `FallbackMode` branches. Forces the corpus straight into the new-RLE / old-RLE / uncompressed inner loops. |
 
 Run any target with:
 
