@@ -136,8 +136,9 @@ the canonical `-Y H +X W` axis.
 
 ## Fuzzing
 
-A `cargo-fuzz` harness under [`fuzz/`](fuzz/) ships four libFuzzer
-targets covering the public decode + encode surface end-to-end. The
+A `cargo-fuzz` harness under [`fuzz/`](fuzz/) ships five libFuzzer
+targets covering the public decode + encode + colour-conversion surface
+end-to-end. The
 harness uses the standalone (`default-features = false`) build so it
 never links `oxideav-core` — the targets exercise only the
 framework-free `parse_hdr` / `encode_hdr` path that downstream
@@ -149,12 +150,13 @@ image-library consumers actually call.
 | `roundtrip`  | Synthesise a fuzz-driven small picture, run `encode_hdr` → `parse_hdr`, assert structure survives end-to-end. Catches encoder/decoder asymmetries. |
 | `headers`    | Prepend a valid `#?RADIANCE\n` magic and a minimal `-Y 1 +X 8\n` resolution line so libFuzzer's coverage gradient focuses the corpus on the text `KEY=VALUE` parse (EXPOSURE / COLORCORR / PRIMARIES floats, comment lines, mid-line `=`). |
 | `pixels`     | Wrap a *fuzz-controlled pixel section* in a valid container envelope (magic + blank line + a fuzz-chosen `-Y H +X W` resolution line with small, bounded dimensions), then decode it under **both** `FallbackMode` branches. Forces the corpus straight into the new-RLE / old-RLE / uncompressed inner loops. |
+| `colorconv`  | Drive the **float-domain colour pipeline** — XYZE↔RGB conversion (named-space, arbitrary-`PRIMARIES`, and `_with_effective_` forms), `rgb_to_xyz_matrix_from_primaries` / `xyz_to_rgb_matrix_from_primaries` (the `3×3` inversion), `luminance_lm_per_sr_per_m2`, and all eight tone-mapping operators — on raw fuzz bytes reinterpreted **verbatim** as `f32`. The four byte-surface targets only feed this code floats laundered through the RGBE quantiser (finite, non-negative, bounded), so NaN / ±inf / negative / subnormal samples and degenerate chromaticity records reach the matrix inversion and per-operator transcendentals only here. Asserts every call returns without panicking and that buffer-length / `Rgb24` byte-count invariants hold. |
 
 Run any target with:
 
 ```sh
 cd fuzz
-cargo +nightly fuzz run decode      # or roundtrip / headers / pixels
+cargo +nightly fuzz run decode      # or roundtrip / headers / pixels / colorconv
 ```
 
 The harness is `cargo-fuzz` standard layout — `fuzz/Cargo.toml` declares

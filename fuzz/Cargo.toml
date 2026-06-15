@@ -24,7 +24,7 @@ cargo-fuzz = true
 #    `4 * width` byte RGBE quads with no sentinels). All three are
 #    reachable from arbitrary fuzz input.
 #
-# Four targets:
+# Five targets:
 #
 #  * `decode`     — feed arbitrary bytes to `parse_hdr` and assert the
 #                   call always *returns* (Result-vs-panic). Default
@@ -58,6 +58,15 @@ cargo-fuzz = true
 #                   prefix first) and `roundtrip` never reaches at all
 #                   (it only decodes the encoder's own well-formed
 #                   output).
+#  * `colorconv`  — drive the float-domain colour pipeline (XYZE↔RGB
+#                   conversion, primaries-matrix derivation, photometric
+#                   luminance, and the eight tone-mapping operators) on
+#                   *verbatim* fuzz-byte floats so NaN / ±inf / negative
+#                   / subnormal samples and degenerate `PRIMARIES`
+#                   records — all of which the four byte-surface targets
+#                   launder away through the RGBE quantiser — reach the
+#                   `3×3` matrix inversion and the per-operator
+#                   transcendentals directly.
 #
 # The crate is pulled in with `default-features = false` so the fuzz
 # build exercises the framework-free standalone `parse_hdr` /
@@ -98,5 +107,11 @@ doc = false
 [[bin]]
 name = "pixels"
 path = "fuzz_targets/pixels.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "colorconv"
+path = "fuzz_targets/colorconv.rs"
 test = false
 doc = false
