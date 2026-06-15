@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.0.5](https://github.com/OxideAV/oxideav-hdr/compare/v0.0.4...v0.0.5) - 2026-06-15
+
+### Other
+
+- tolerate surrounding whitespace in FORMAT= value (round 313)
+- refresh to current status, drop per-round changelog cruft
+
 ### Other
 
 - round 313: tolerate surrounding whitespace in the `FORMAT=` value (`.trim()` before matching the two valid pixel formats, matching the lenient whitespace handling every sibling typed header field already applies); interior non-format tokens still rejected as unsupported
