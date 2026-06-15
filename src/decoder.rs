@@ -225,7 +225,15 @@ fn parse_header(input: &[u8], cursor: &mut usize) -> Result<HdrHeader> {
                     return Err(Error::invalid("HDR: at most one FORMAT line is allowed"));
                 }
                 format_seen = true;
-                header.format = match value {
+                // The spec takes the assigned value "up until the end of
+                // line"; real writers occasionally pad the value with
+                // surrounding spaces (`FORMAT= 32-bit_rle_rgbe`). Trim it
+                // before matching so the FORMAT slot tolerates the same
+                // incidental whitespace every sibling typed field already
+                // accepts (EXPOSURE/GAMMA/PIXASPECT/COLORCORR all `.trim()`).
+                // CRLF is already handled by trim_cr above.
+                let format_value = value.trim();
+                header.format = match format_value {
                     "32-bit_rle_rgbe" => HdrFormat::Rgbe,
                     "32-bit_rle_xyze" => HdrFormat::Xyze,
                     other => {
@@ -831,6 +839,43 @@ mod tests {
         let mut cursor = 0usize;
         let header = parse_header(bytes, &mut cursor).unwrap();
         assert_eq!(header.format, HdrFormat::Xyze);
+    }
+
+    #[test]
+    fn format_value_tolerates_surrounding_whitespace() {
+        // The spec takes the FORMAT value "up until the end of line"; a
+        // writer that pads it with incidental spaces still names a valid
+        // pixel format. Trimming brings FORMAT in line with the lenient
+        // whitespace handling every sibling typed field already applies.
+        let cases: &[(&[u8], HdrFormat)] = &[
+            (
+                b"#?RADIANCE\nFORMAT= 32-bit_rle_rgbe\n\n-Y 1 +X 8\n",
+                HdrFormat::Rgbe,
+            ),
+            (
+                b"#?RADIANCE\nFORMAT=32-bit_rle_rgbe \n\n-Y 1 +X 8\n",
+                HdrFormat::Rgbe,
+            ),
+            (
+                b"#?RADIANCE\nFORMAT=\t32-bit_rle_xyze\t\n\n-Y 1 +X 8\n",
+                HdrFormat::Xyze,
+            ),
+        ];
+        for (bytes, expected) in cases {
+            let mut cursor = 0usize;
+            let header = parse_header(bytes, &mut cursor).unwrap();
+            assert_eq!(header.format, *expected);
+        }
+    }
+
+    #[test]
+    fn format_value_with_embedded_garbage_still_rejected() {
+        // Trimming only strips surrounding whitespace; an interior token
+        // that isn't one of the two valid pixel formats must still be
+        // rejected as unsupported, not silently coerced.
+        let bytes = b"#?RADIANCE\nFORMAT= 64-bit_rle_rgbe \n\n-Y 1 +X 8\n";
+        let mut cursor = 0usize;
+        assert!(parse_header(bytes, &mut cursor).is_err());
     }
 
     #[test]
