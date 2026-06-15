@@ -352,6 +352,17 @@ pub struct HdrHeader {
     /// excluding the leading `#?…` magic line. Stored without the
     /// leading `#`.
     pub comments: Vec<String>,
+    /// Program / command lines carried in the header. The staged format
+    /// note documents the header as the `#?…` identifier line "followed
+    /// by one or more lines giving the programs used to produce the
+    /// picture, interspersed with variable assignments". Such a line is
+    /// neither a comment (`#…`) nor a `KEY=VALUE` assignment — it is the
+    /// verbatim command (e.g. `rpict -vp 0 0 0 scene.oct`) that created
+    /// the file. Every line in the header that contains no `=` and does
+    /// not start with `#` is preserved here, in read order, so a
+    /// decode→encode round-trip reproduces it instead of rejecting the
+    /// file outright. Stored verbatim (no trailing newline).
+    pub commands: Vec<String>,
     /// Sign on the Y (row-direction) axis flag in the resolution line.
     /// Defaults to [`AxisSign::Decreasing`] which gives the standard
     /// top-down `-Y H +X W` layout.
@@ -377,6 +388,7 @@ impl Default for HdrHeader {
             primaries: None,
             other: Vec::new(),
             comments: Vec::new(),
+            commands: Vec::new(),
             y_sign: AxisSign::Decreasing,
             x_sign: AxisSign::Increasing,
             x_first: false,

@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Other
 
+- round 316: preserve header program/command lines per the format note ("the `#?…` identifier followed by one or more lines giving the programs used to produce the picture, interspersed with variable assignments"); a non-comment header line without `=` is now kept verbatim in `HdrHeader::commands` and re-emitted right after the magic line on encode, instead of rejecting the whole file with "header line without '='" — renderer-produced `.hdr` files routinely carry such command lines
 - round 313: tolerate surrounding whitespace in the `FORMAT=` value (`.trim()` before matching the two valid pixel formats, matching the lenient whitespace handling every sibling typed header field already applies); interior non-format tokens still rejected as unsupported
 
 ## [0.0.4](https://github.com/OxideAV/oxideav-hdr/compare/v0.0.3...v0.0.4) - 2026-06-15

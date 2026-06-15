@@ -410,6 +410,13 @@ fn write_header(out: &mut Vec<u8>, header: &HdrHeader, eol: LineEnding, magic: &
     out.extend_from_slice(b"#?");
     out.extend_from_slice(magic.identifier().as_bytes());
     out.extend_from_slice(nl);
+    // Program / command lines come right after the `#?…` identifier per
+    // the format note ("followed by one or more lines giving the programs
+    // used to produce the picture"), ahead of the variable assignments.
+    for c in &header.commands {
+        out.extend_from_slice(c.as_bytes());
+        out.extend_from_slice(nl);
+    }
     out.extend_from_slice(format!("FORMAT={}", header.format.as_str()).as_bytes());
     out.extend_from_slice(nl);
     if let Some(g) = header.gamma {
@@ -840,6 +847,43 @@ mod tests {
             back.header.software.as_deref(),
             Some("oxideav-hdr/rgbe-magic")
         );
+    }
+
+    #[test]
+    fn command_lines_round_trip_through_encode_decode() {
+        // Header command lines (the programs-that-made-the-picture lines
+        // the spec mandates) must survive a full encode→decode cycle, in
+        // read order, and be emitted right after the `#?…` identifier.
+        let mut img = pattern(16, 2);
+        img.header.commands = vec![
+            "oconv scene.rad > scene.oct".to_owned(),
+            "rpict -vp 0 0 0 scene.oct".to_owned(),
+        ];
+        let bytes = encode_hdr_with_options(&img, RleMode::New, LineEnding::Lf).unwrap();
+        // Command lines lead the header, ahead of FORMAT.
+        let head = String::from_utf8_lossy(&bytes);
+        let body = head.strip_prefix("#?RADIANCE\n").unwrap();
+        assert!(
+            body.starts_with("oconv scene.rad > scene.oct\nrpict -vp 0 0 0 scene.oct\nFORMAT="),
+            "command lines not emitted ahead of FORMAT: {body:?}",
+        );
+        let back = parse_hdr(&bytes).unwrap();
+        assert_eq!(
+            back.header.commands,
+            vec!["oconv scene.rad > scene.oct", "rpict -vp 0 0 0 scene.oct"]
+        );
+    }
+
+    #[test]
+    fn command_lines_round_trip_under_crlf() {
+        let mut img = pattern(16, 2);
+        img.header.commands = vec!["rpict scene.oct".to_owned()];
+        let bytes = encode_hdr_with_options(&img, RleMode::New, LineEnding::Crlf).unwrap();
+        assert!(bytes
+            .windows(b"#?RADIANCE\r\nrpict scene.oct\r\n".len())
+            .any(|w| w == b"#?RADIANCE\r\nrpict scene.oct\r\n"));
+        let back = parse_hdr(&bytes).unwrap();
+        assert_eq!(back.header.commands, vec!["rpict scene.oct"]);
     }
 
     #[test]

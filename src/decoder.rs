@@ -210,11 +210,21 @@ fn parse_header(input: &[u8], cursor: &mut usize) -> Result<HdrHeader> {
             header.comments.push(comment.to_owned());
             continue;
         }
+        // A header line that contains no '=' and does not start with '#'
+        // is a program / command line — the staged format note documents
+        // the header as the `#?…` identifier "followed by one or more
+        // lines giving the programs used to produce the picture,
+        // interspersed with variable assignments". Renderer-produced
+        // files routinely carry at least one such command line (e.g.
+        // `rpict -vp 0 0 0 scene.oct`), so preserve it verbatim for a
+        // lossless re-encode rather than rejecting the whole file.
+        let Some(eq) = line.iter().position(|&b| b == b'=') else {
+            let command = std::str::from_utf8(line)
+                .map_err(|_| Error::invalid("HDR: non-UTF8 command line"))?;
+            header.commands.push(command.to_owned());
+            continue;
+        };
         // KEY=VALUE record.
-        let eq = line
-            .iter()
-            .position(|&b| b == b'=')
-            .ok_or_else(|| Error::invalid("HDR: header line without '='"))?;
         let key = std::str::from_utf8(&line[..eq])
             .map_err(|_| Error::invalid("HDR: non-UTF8 header key"))?;
         let value = std::str::from_utf8(&line[eq + 1..])
@@ -940,6 +950,60 @@ mod tests {
         let bytes = b"RADIANCE\n\n-Y 1 +X 8\n";
         let mut cursor = 0usize;
         assert!(parse_header(bytes, &mut cursor).is_err());
+    }
+
+    #[test]
+    fn header_command_line_is_preserved_not_rejected() {
+        // The staged format note says the header is the `#?…` line
+        // "followed by one or more lines giving the programs used to
+        // produce the picture". Such a line carries no '=' and is not a
+        // comment, so the decoder must keep it as a command line rather
+        // than rejecting the file with "header line without '='".
+        let bytes = b"#?RADIANCE\nrpict -vp 0 0 0 scene.oct\nFORMAT=32-bit_rle_rgbe\n\n-Y 1 +X 8\n";
+        let mut cursor = 0usize;
+        let header = parse_header(bytes, &mut cursor).unwrap();
+        assert_eq!(header.commands, vec!["rpict -vp 0 0 0 scene.oct"]);
+        assert_eq!(header.format, HdrFormat::Rgbe);
+    }
+
+    #[test]
+    fn multiple_interspersed_command_lines_kept_in_read_order() {
+        // Several command lines, interspersed with variable assignments,
+        // all survive in the order they appeared.
+        let bytes = b"#?RADIANCE\noconv scene.rad > scene.oct\nEXPOSURE=2.0\nrpict -vp 0 0 0 scene.oct\npfilt -1 -x 512 -y 512\n\n-Y 1 +X 8\n";
+        let mut cursor = 0usize;
+        let header = parse_header(bytes, &mut cursor).unwrap();
+        assert_eq!(
+            header.commands,
+            vec![
+                "oconv scene.rad > scene.oct",
+                "rpict -vp 0 0 0 scene.oct",
+                "pfilt -1 -x 512 -y 512",
+            ]
+        );
+        assert_eq!(header.exposure, Some(2.0));
+    }
+
+    #[test]
+    fn command_line_with_embedded_equals_is_parsed_as_assignment() {
+        // A line containing '=' is still a KEY=VALUE assignment, not a
+        // command line, even though the spec lets commands sit alongside
+        // assignments. The '=' is the discriminator.
+        let bytes = b"#?RADIANCE\nSOFTWARE=RADIANCE 5.3\n\n-Y 1 +X 8\n";
+        let mut cursor = 0usize;
+        let header = parse_header(bytes, &mut cursor).unwrap();
+        assert!(header.commands.is_empty());
+        assert_eq!(header.software.as_deref(), Some("RADIANCE 5.3"));
+    }
+
+    #[test]
+    fn command_line_with_crlf_is_trimmed() {
+        // CR-trimming runs before the command-line branch, so a
+        // CRLF-terminated command line stores no trailing CR.
+        let bytes = b"#?RADIANCE\r\nrpict scene.oct\r\n\r\n-Y 1 +X 8\r\n";
+        let mut cursor = 0usize;
+        let header = parse_header(bytes, &mut cursor).unwrap();
+        assert_eq!(header.commands, vec!["rpict scene.oct"]);
     }
 
     #[test]
