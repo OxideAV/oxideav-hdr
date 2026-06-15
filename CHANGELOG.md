@@ -7,6 +7,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- Round 310 (spec-conformance — cumulative `VIEW=` merge): the header
+  parser now folds multiple `VIEW=` records together per the format
+  note's §1 header-variable table — "Multiple assignments are cumulative
+  inasmuch as new view options add to or override old ones" — instead of
+  the previous whole-string last-wins overwrite. A Radiance view string
+  is an optional leading command/program token run (e.g. `rvu` / `rpict`)
+  followed by `-v<x>` option groups; the new merge is structural and
+  needs no per-flag argument-count table (the format note doesn't publish
+  one): each `-v<x>` group present in a later record overrides the same
+  flag in the accumulated view ("override old ones"), a flag only in the
+  later record is appended in first-seen order ("add to"), a flag only in
+  the accumulator is preserved, and the later record's leading command
+  prefix replaces the earlier one (it describes the present picture). The
+  merge rebuilds the value as a single space-separated string so it still
+  round-trips verbatim through the existing `VIEW=` writer. Through round
+  309 a second `VIEW=` record silently dropped every option the earlier
+  record carried — e.g. a re-render pass that only re-stated `-vp`
+  erased the original `-vd` / `-vu` / `-vh` view geometry. The
+  single-record happy path is unchanged (the first record seeds the
+  accumulator with its literal value). Five new unit tests pin the
+  override-in-place case, the add-new-option case, the combined
+  override-and-add case (earlier-only option survives, first-seen order
+  preserved), the single-record pass-through, and a three-record
+  left-to-right fold; the stale `last_view_record_wins_when_stacked`
+  test that encoded the old whole-string-overwrite premise is rewritten
+  in place. The encoder, the `VIEW=` round-trip test, and the standalone
+  (`default-features = false`) build are unchanged.
+
 ### Added
 
 - Round 305: a named `Orientation` enum capturing all eight legal

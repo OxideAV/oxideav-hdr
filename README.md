@@ -15,7 +15,7 @@ takes the same shape and emits a complete file with the canonical
 Clean-room implementation against the published format documentation
 (the published format documentation). No external library source consulted.
 
-## Coverage (round 305)
+## Coverage (round 310)
 
 | Feature                      | Read | Write |
 |------------------------------|:----:|:-----:|
@@ -25,6 +25,7 @@ Clean-room implementation against the published format documentation
 | `FORMAT` declared **at most once** (a second `FORMAT=` record is rejected as invalid per the staged spec's "at most one FORMAT line is allowed", rather than last-wins overwriting an ambiguous pixel-format declaration) | Y (enforced) | Y (single) |
 | `EXPOSURE` / `GAMMA` / `PIXASPECT` / `SOFTWARE` | Y | Y |
 | `VIEW=` renderer view-parameter record | Y | Y |
+| Multiple `VIEW=` records merged cumulatively (a later `-v<x>` option group overrides the same flag in the accumulated view, genuinely-new flags are appended, the later command prefix wins — per the format note's "cumulative inasmuch as new view options add to or override old ones" rule, not whole-string last-wins) | Y | n/a |
 | Multiple `EXPOSURE` / `COLORCORR` / `PIXASPECT` records stacked multiplicatively | Y | n/a |
 | `COLORCORR` (3-float)        |  Y   |   Y   |
 | `HdrImage::effective_pixaspect` (header value or reference-manual default `1.0`) | helper | n/a |

@@ -275,14 +275,19 @@ fn parse_header(input: &[u8], cursor: &mut usize) -> Result<HdrHeader> {
                 header.software = Some(value.to_owned());
             }
             "VIEW" => {
-                // Per the Radiance reference manual, the VIEW record is
-                // free-form text containing the renderer's view
-                // parameters. We preserve the literal value. When more
-                // than one VIEW record appears (renderers can stack
-                // them across rerender passes), each subsequent one
-                // wins — the reference convention is "the last VIEW=
-                // record on the page describes the present picture".
-                header.view = Some(value.to_owned());
+                // Per the format note's §1 header-variable table, the
+                // VIEW record is "cumulative inasmuch as new view options
+                // add to or override old ones" — a later VIEW record does
+                // NOT wholesale-replace an earlier one. When more than one
+                // record appears, each `-v<x>` option group in the later
+                // record overrides the same option in the accumulated
+                // view, and option groups not previously present are added
+                // on the end. The first record's value seeds the
+                // accumulator verbatim.
+                header.view = Some(match header.view.take() {
+                    Some(prev) => merge_view(&prev, value),
+                    None => value.to_owned(),
+                });
             }
             "COLORCORR" => {
                 let parts: Vec<&str> = value.split_whitespace().collect();
@@ -317,6 +322,90 @@ fn parse_header(input: &[u8], cursor: &mut usize) -> Result<HdrHeader> {
         }
     }
     Ok(header)
+}
+
+/// Merge a later `VIEW=` record into the accumulated view per the format
+/// note's "cumulative inasmuch as new view options add to or override old
+/// ones" rule (§1 header-variable table).
+///
+/// A Radiance view string is an optional leading command/program token
+/// run (e.g. `rvu`) followed by a sequence of view-option groups, each
+/// introduced by a `-v<x>` flag token and carrying that flag's argument
+/// tokens up to the next flag. The merge is structural and needs no
+/// per-flag argument-count table (which the format note doesn't publish):
+///
+/// * The leading non-flag prefix of `next` (the program / command that
+///   produced the current picture) replaces the accumulated prefix when
+///   `next` carries one; otherwise the accumulated prefix is kept.
+/// * Each `-v<x>` group keyed by its flag token: a group present in
+///   `next` overrides the same flag in the accumulator ("override old
+///   ones"); a flag only in the accumulator is preserved; a flag only in
+///   `next` is appended ("add to") in first-seen order.
+///
+/// The result is rebuilt as a single space-separated string so a
+/// re-encode round-trips it verbatim through the existing VIEW writer.
+fn merge_view(prev: &str, next: &str) -> String {
+    /// Split a view string into `(leading_prefix_tokens, ordered list of
+    /// (flag, group_tokens))`. A flag is any token that starts with `-v`.
+    fn split_groups(s: &str) -> (Vec<&str>, Vec<(&str, Vec<&str>)>) {
+        let mut prefix: Vec<&str> = Vec::new();
+        let mut groups: Vec<(&str, Vec<&str>)> = Vec::new();
+        let mut cur: Option<(&str, Vec<&str>)> = None;
+        for tok in s.split_whitespace() {
+            if tok.starts_with("-v") {
+                if let Some(g) = cur.take() {
+                    groups.push(g);
+                }
+                cur = Some((tok, Vec::new()));
+            } else if let Some((_, args)) = cur.as_mut() {
+                args.push(tok);
+            } else {
+                prefix.push(tok);
+            }
+        }
+        if let Some(g) = cur.take() {
+            groups.push(g);
+        }
+        (prefix, groups)
+    }
+
+    let (prev_prefix, prev_groups) = split_groups(prev);
+    let (next_prefix, next_groups) = split_groups(next);
+
+    // Accumulate groups in first-seen order, overriding args when the
+    // same flag reappears in `next`.
+    let mut order: Vec<String> = Vec::new();
+    let mut args_for: std::collections::HashMap<String, Vec<String>> =
+        std::collections::HashMap::new();
+    let mut record = |flag: &str, args: &[&str]| {
+        let key = flag.to_owned();
+        if !args_for.contains_key(&key) {
+            order.push(key.clone());
+        }
+        args_for.insert(key, args.iter().map(|a| (*a).to_owned()).collect());
+    };
+    for (flag, args) in &prev_groups {
+        record(flag, args);
+    }
+    for (flag, args) in &next_groups {
+        record(flag, args);
+    }
+
+    // The later record's command prefix wins when present.
+    let prefix = if next_prefix.is_empty() {
+        prev_prefix
+    } else {
+        next_prefix
+    };
+
+    let mut out: Vec<String> = prefix.iter().map(|t| (*t).to_owned()).collect();
+    for flag in &order {
+        out.push(flag.clone());
+        if let Some(args) = args_for.get(flag) {
+            out.extend(args.iter().cloned());
+        }
+    }
+    out.join(" ")
 }
 
 fn parse_resolution(
@@ -648,14 +737,68 @@ mod tests {
     }
 
     #[test]
-    fn last_view_record_wins_when_stacked() {
-        // Renderers can write multiple VIEW= records across rerender
-        // passes. The reference convention is "the last VIEW record on
-        // the page describes the present picture".
+    fn stacked_view_records_override_same_option() {
+        // Per the format note's §1 header-variable table, VIEW is
+        // "cumulative inasmuch as new view options add to or override old
+        // ones". A second record carrying the same `-vp` option overrides
+        // the first record's `-vp` (the later value describes the present
+        // picture), not the whole accumulated view.
         let bytes = b"#?RADIANCE\nVIEW=rvu -vp 0 0 5\nVIEW=rvu -vp 0 0 10\n\n-Y 1 +X 8\n";
         let mut cursor = 0usize;
         let header = parse_header(bytes, &mut cursor).unwrap();
         assert_eq!(header.view.as_deref(), Some("rvu -vp 0 0 10"));
+    }
+
+    #[test]
+    fn stacked_view_records_add_new_options() {
+        // A later record that introduces a NEW option (`-vd`) the earlier
+        // record didn't carry must ADD it to the accumulated view rather
+        // than dropping the earlier `-vp` — the "add to" half of the
+        // cumulative rule.
+        let bytes = b"#?RADIANCE\nVIEW=-vp 0 0 5\nVIEW=-vd 0 0 -1\n\n-Y 1 +X 8\n";
+        let mut cursor = 0usize;
+        let header = parse_header(bytes, &mut cursor).unwrap();
+        assert_eq!(header.view.as_deref(), Some("-vp 0 0 5 -vd 0 0 -1"));
+    }
+
+    #[test]
+    fn stacked_view_records_override_and_add_together() {
+        // Combined case: the later record overrides one shared option
+        // (`-vp`) in place and adds two genuinely-new ones (`-vu`, `-vh`),
+        // while the earlier-only option (`-vd`) survives. First-seen flag
+        // order is preserved so the override happens in place.
+        let bytes = b"#?RADIANCE\nVIEW=rpict -vp 0 0 5 -vd 0 0 -1\nVIEW=rpict -vp 1 2 3 -vu 0 1 0 -vh 45\n\n-Y 1 +X 8\n";
+        let mut cursor = 0usize;
+        let header = parse_header(bytes, &mut cursor).unwrap();
+        assert_eq!(
+            header.view.as_deref(),
+            Some("rpict -vp 1 2 3 -vd 0 0 -1 -vu 0 1 0 -vh 45")
+        );
+    }
+
+    #[test]
+    fn single_view_record_is_passed_through_verbatim() {
+        // The cumulative merge must not perturb the single-record case
+        // (the round 1..309 happy path): one VIEW record seeds the
+        // accumulator with its literal value, untouched by the merger.
+        let bytes = b"#?RADIANCE\nVIEW=rvu -vp 0 0 10 -vd 0 0 -1 -vh 30\n\n-Y 1 +X 8\n";
+        let mut cursor = 0usize;
+        let header = parse_header(bytes, &mut cursor).unwrap();
+        assert_eq!(
+            header.view.as_deref(),
+            Some("rvu -vp 0 0 10 -vd 0 0 -1 -vh 30")
+        );
+    }
+
+    #[test]
+    fn three_stacked_view_records_fold_left_to_right() {
+        // Three records exercise the running fold: each is merged into the
+        // accumulator in turn, so the final `-vp` (third record) wins and
+        // every distinct option seen along the way is present once.
+        let bytes = b"#?RADIANCE\nVIEW=-vp 0 0 1\nVIEW=-vp 0 0 2 -vh 20\nVIEW=-vp 0 0 3 -vv 25\n\n-Y 1 +X 8\n";
+        let mut cursor = 0usize;
+        let header = parse_header(bytes, &mut cursor).unwrap();
+        assert_eq!(header.view.as_deref(), Some("-vp 0 0 3 -vh 20 -vv 25"));
     }
 
     #[test]
