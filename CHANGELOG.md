@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.0.5](https://github.com/OxideAV/oxideav-hdr/compare/v0.0.4...v0.0.5) - 2026-06-16
+
+### Other
+
+- round 323: primaries-aware photometric luminance
+- round 319 (depth — fuzz): add `colorconv` target for the float colour pipeline
+- round 316: preserve header program/command lines instead of rejecting
+- tolerate surrounding whitespace in FORMAT= value (round 313)
+- refresh to current status, drop per-round changelog cruft
+
 ### Other
 
 - round 323: primaries-aware photometric luminance. The reference manual's fixed RGBE luminance weights `(0.265, 0.670, 0.065)` are exactly the CIE-Y row of Greg Ward's standard-primaries RGB→XYZ matrix, so a picture that declares a non-standard `PRIMARIES=` record (a wide-gamut P3 / Rec. 2020 render, or any custom 8-float record) carries *different* luminance weights — the Y row of *its* matrix. Adds `xyz::rgbe_luminance_coeffs_from_primaries(Primaries) -> Option<[f32;3]>` (the Y row of the derived matrix; `None` for degenerate records), `xyz::luminance_lm_per_sr_per_m2_with_primaries(pixel, format, Primaries)` (projects RGBE through those weights × 179, falls back to the fixed coefficients on degenerate primaries; XYZE stays `179 * Y` since the Y channel is already CIE Y independent of any RGB primaries), and `HdrImage::luminance_buffer_with_effective_primaries()` (whole-image variant threading the file's own `effective_primaries()`). On the default Radiance primaries every helper reproduces the fixed-coefficient `luminance_lm_per_sr_per_m2` within f32 precision
