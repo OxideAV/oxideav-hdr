@@ -201,6 +201,96 @@ mod tests {
     }
 
     #[test]
+    fn square_pixel_dimensions_identity_for_square_pixels() {
+        // No PIXASPECT record → square pixels → the displayed shape is
+        // exactly the sample-grid dimensions.
+        let img = HdrImage::new_rgb96f(64, 48, vec![0.0; 64 * 48 * 3]);
+        let (w, h) = img.square_pixel_dimensions();
+        assert!((w - 64.0).abs() < 1e-4);
+        assert!((h - 48.0).abs() < 1e-4);
+        // Naive sample-grid ratio and display ratio coincide for square
+        // pixels.
+        assert!((img.display_aspect_ratio() - 64.0 / 48.0).abs() < 1e-5);
+    }
+
+    #[test]
+    fn square_pixel_dimensions_stretches_height_by_pixaspect() {
+        // Spec §1: PIXASPECT = pixel height / pixel width. A factor of 2
+        // means each pixel is twice as tall as wide, so the displayed
+        // picture is twice as tall as the sample grid: width unchanged,
+        // height doubled.
+        let mut img = HdrImage::new_rgb96f(100, 50, vec![0.0; 100 * 50 * 3]);
+        img.header.pixaspect = Some(2.0);
+        let (w, h) = img.square_pixel_dimensions();
+        assert!((w - 100.0).abs() < 1e-4, "{w}");
+        assert!((h - 100.0).abs() < 1e-4, "{h}");
+    }
+
+    #[test]
+    fn square_pixel_dimensions_compresses_height_for_subunit_pixaspect() {
+        // PIXASPECT < 1 → pixels wider than tall → displayed height is a
+        // fraction of the sample-grid height.
+        let mut img = HdrImage::new_rgb96f(80, 80, vec![0.0; 80 * 80 * 3]);
+        img.header.pixaspect = Some(0.5);
+        let (w, h) = img.square_pixel_dimensions();
+        assert!((w - 80.0).abs() < 1e-4, "{w}");
+        assert!((h - 40.0).abs() < 1e-4, "{h}");
+    }
+
+    #[test]
+    fn display_aspect_ratio_differs_from_sample_grid_for_nonsquare_pixels() {
+        // Spec §1 warns PIXASPECT is "Not the image aspect ratio". A
+        // square 512×512 sample grid stored with PIXASPECT=2 should be
+        // shown at a 1:2 (wide:tall) display ratio = 0.5, even though the
+        // naive grid ratio is 1.0.
+        let mut img = HdrImage::new_rgb96f(512, 512, vec![0.0; 512 * 512 * 3]);
+        img.header.pixaspect = Some(2.0);
+        assert!((img.display_aspect_ratio() - 0.5).abs() < 1e-5);
+        // The sample grid itself stays square.
+        assert_eq!((img.width, img.height), (512, 512));
+    }
+
+    #[test]
+    fn square_pixel_dimensions_folds_cumulative_pixaspect_product() {
+        // The decoder folds multiple PIXASPECT= records into the running
+        // product in header.pixaspect, so the helper sees the combined
+        // factor (here 0.5 * 4.0 = 2.0).
+        let mut img = HdrImage::new_rgb96f(10, 30, vec![0.0; 10 * 30 * 3]);
+        img.header.pixaspect = Some(0.5 * 4.0);
+        let (w, h) = img.square_pixel_dimensions();
+        assert!((w - 10.0).abs() < 1e-4, "{w}");
+        assert!((h - 60.0).abs() < 1e-4, "{h}");
+    }
+
+    #[test]
+    fn square_pixel_dimensions_degenerate_pixaspect_is_identity() {
+        // A 0.0 or non-finite cumulative factor is treated as the 1.0
+        // identity (the permissive handling the recover_* helpers use), so
+        // a malformed PIXASPECT can never produce a 0 / non-finite display
+        // size.
+        for bad in [0.0_f32, f32::NAN, f32::INFINITY, -1.0] {
+            let mut img = HdrImage::new_rgb96f(20, 10, vec![0.0; 20 * 10 * 3]);
+            img.header.pixaspect = Some(bad);
+            let (w, h) = img.square_pixel_dimensions();
+            assert!(w.is_finite() && h.is_finite(), "bad={bad}");
+            assert!((w - 20.0).abs() < 1e-4, "bad={bad} w={w}");
+            assert!((h - 10.0).abs() < 1e-4, "bad={bad} h={h}");
+            assert!(img.display_aspect_ratio().is_finite());
+        }
+    }
+
+    #[test]
+    fn display_aspect_ratio_zero_height_returns_one() {
+        // Degenerate zero-height picture: no sensible ratio exists, so the
+        // helper returns 1.0 rather than a non-finite value.
+        let img = HdrImage::new_rgb96f(8, 0, vec![]);
+        assert_eq!(img.display_aspect_ratio(), 1.0);
+        let (w, h) = img.square_pixel_dimensions();
+        assert!((w - 8.0).abs() < 1e-4);
+        assert_eq!(h, 0.0);
+    }
+
+    #[test]
     fn apply_colorcorr_unit_vector_is_a_no_op() {
         let mut img = HdrImage::new_rgb96f(1, 1, vec![0.7, 0.5, 0.3]);
         img.header.colorcorr = Some([1.0, 1.0, 1.0]);
@@ -637,6 +727,68 @@ impl HdrImage {
     /// any extra arithmetic.
     pub fn effective_pixaspect(&self) -> f32 {
         self.header.pixaspect.unwrap_or(1.0)
+    }
+
+    /// The picture's dimensions corrected for non-square pixels, as a
+    /// floating-point `(width, height)` pair in *square-pixel* units —
+    /// i.e. the shape the image must be drawn at so it isn't displayed
+    /// distorted.
+    ///
+    /// The staged spec (`docs/image/hdr/radiance-hdr-rgbe-format.md` §1
+    /// PIXASPECT row) defines `PIXASPECT=` as the *pixel* aspect ratio,
+    /// "pixel height / pixel width", and warns it is explicitly **not**
+    /// the image aspect ratio. A `PIXASPECT` of `p` therefore means each
+    /// stored pixel is `p` times as tall as it is wide; a consumer that
+    /// ignores the record and draws the `width × height` sample grid on a
+    /// square-pixel display squashes the picture vertically by the factor
+    /// `p`. Restoring the intended geometry stretches the height axis by
+    /// `p`, leaving the width axis unchanged: the displayed shape is
+    /// `(width, height * p)`. The cumulative `PIXASPECT` product the
+    /// decoder folds into [`HdrHeader::pixaspect`] is used via
+    /// [`Self::effective_pixaspect`], so multiple `PIXASPECT=` records and
+    /// the absent-record default of `1.0` (square pixels, returns the
+    /// stored dimensions unchanged) are both handled.
+    ///
+    /// Returns floats because the corrected height is generally
+    /// fractional; the stored integer [`Self::width`] / [`Self::height`]
+    /// are the sample-grid dimensions and are untouched. The picture's
+    /// *sample count* and on-disk layout do not change — only the
+    /// proportions a viewer should present. A degenerate cumulative factor
+    /// (`0.0` or non-finite) is treated as the `1.0` identity, matching
+    /// the permissive handling the `recover_*` helpers use, so a malformed
+    /// `PIXASPECT=` can never yield a `0` or non-finite display size.
+    pub fn square_pixel_dimensions(&self) -> (f32, f32) {
+        let p = self.effective_pixaspect();
+        let p = if p > 0.0 && p.is_finite() { p } else { 1.0 };
+        (self.width as f32, self.height as f32 * p)
+    }
+
+    /// The aspect ratio (width ÷ height) the picture should be *displayed*
+    /// at once its non-square pixels are accounted for — the proportions
+    /// the spec's PIXASPECT record exists to communicate.
+    ///
+    /// Derived from [`Self::square_pixel_dimensions`]: with `PIXASPECT=p`
+    /// meaning each pixel is `p` times as tall as wide (staged spec §1
+    /// PIXASPECT row, "pixel height / pixel width"), the displayed shape
+    /// is `(width, height * p)` square-pixel units, so the displayed
+    /// width-to-height ratio is `width / (height * p)`. The spec is
+    /// explicit that this is *not* the same as the naive sample-grid ratio
+    /// `width / height` — that equality holds only for square pixels
+    /// (`PIXASPECT` absent or `1.0`). For example a `512 × 512` picture
+    /// stored with `PIXASPECT=2` is meant to be shown at a 1:2
+    /// (wide:tall) display ratio, i.e. `display_aspect_ratio() == 0.5`,
+    /// even though its sample grid is square.
+    ///
+    /// Returns `1.0` for a zero-height picture (no sensible ratio exists)
+    /// rather than producing a non-finite value, and folds the same
+    /// degenerate-`PIXASPECT` guard as [`Self::square_pixel_dimensions`].
+    pub fn display_aspect_ratio(&self) -> f32 {
+        let (w, h) = self.square_pixel_dimensions();
+        if h > 0.0 {
+            w / h
+        } else {
+            1.0
+        }
     }
 
     /// Cumulative `EXPOSURE=` multiplier the picture declared, with the

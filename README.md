@@ -29,6 +29,7 @@ No external library source consulted.
 | Multiple `EXPOSURE` / `COLORCORR` / `PIXASPECT` records stacked multiplicatively | Y | n/a |
 | `COLORCORR` (3-float)        |  Y   |   Y   |
 | `HdrImage::effective_pixaspect` (header value or reference-manual default `1.0`) | helper | n/a |
+| `HdrImage::square_pixel_dimensions` / `display_aspect_ratio` (display geometry corrected for non-square pixels per spec §1's "PIXASPECT = pixel height / pixel width … **not** the image aspect ratio": stretches the height axis by the cumulative `PIXASPECT` factor so a viewer draws the picture undistorted — `(width, height·p)` square-pixel size and the `width/(height·p)` displayed width:height ratio; degenerate `0`/non-finite factor and zero height fall back to the `1.0` identity) | helper | n/a |
 | `HdrImage::effective_exposure` (header value or staged-spec default `1.0` per "no `EXPOSURE` ⇒ none applied") | helper | n/a |
 | `HdrImage::effective_colorcorr` (header value or staged-spec default `[1.0, 1.0, 1.0]` per "should have unit brightness") | helper | n/a |
 | `PRIMARIES` (8-float chromaticity) | Y |   Y   |
