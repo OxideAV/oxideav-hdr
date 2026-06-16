@@ -97,6 +97,95 @@ mod tests {
     }
 
     #[test]
+    fn scene_referred_luminance_equals_file_luminance_without_records() {
+        // No EXPOSURE / COLORCORR: scene-referred recovery is the
+        // identity, so the physical-luminance buffer must agree with the
+        // file-referred `luminance_buffer` exactly.
+        let pixels = vec![1.0, 0.5, 0.25, 0.1, 0.8, 0.3];
+        let img = HdrImage::new_rgb96f(2, 1, pixels);
+        assert!(img.header.exposure.is_none());
+        assert!(img.header.colorcorr.is_none());
+        let file = img.luminance_buffer();
+        let scene = img.scene_referred_luminance_buffer();
+        assert_eq!(file.len(), scene.len());
+        for (f, s) in file.iter().zip(scene.iter()) {
+            assert!((f - s).abs() < 1e-3, "{f} vs {s}");
+        }
+    }
+
+    #[test]
+    fn scene_referred_luminance_divides_out_exposure() {
+        // EXPOSURE=4 was baked in; stored pixel = radiance * 4. The
+        // physical luminance must be computed on radiance = stored / 4,
+        // i.e. exactly 1/4 of the file-referred luminance.
+        let pixels = vec![1.0, 1.0, 1.0];
+        let mut img = HdrImage::new_rgb96f(1, 1, pixels);
+        img.header.exposure = Some(4.0);
+        let scene = img.scene_referred_luminance_buffer();
+        // recovered = (0.25,0.25,0.25) ⇒ 179 * 0.25 = 44.75.
+        assert!((scene[0] - 179.0 * 0.25).abs() < 1e-2, "{}", scene[0]);
+        // Non-mutating: the header slot and pixels are untouched.
+        assert_eq!(img.header.exposure, Some(4.0));
+        assert!((img.pixels[0] - 1.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn scene_referred_luminance_divides_out_colorcorr_per_channel() {
+        // COLORCORR=(2,4,5) was baked in; recover by the per-channel
+        // reciprocal before the 179*(0.265R+0.670G+0.065B) projection.
+        let pixels = vec![2.0, 4.0, 5.0];
+        let mut img = HdrImage::new_rgb96f(1, 1, pixels);
+        img.header.colorcorr = Some([2.0, 4.0, 5.0]);
+        let scene = img.scene_referred_luminance_buffer();
+        // recovered = (1,1,1) ⇒ 179 * (0.265+0.670+0.065) = 179.
+        assert!((scene[0] - 179.0).abs() < 1e-2, "{}", scene[0]);
+        assert_eq!(img.header.colorcorr, Some([2.0, 4.0, 5.0]));
+    }
+
+    #[test]
+    fn scene_referred_luminance_composes_exposure_and_colorcorr() {
+        // Both records present: divide by the EXPOSURE product *and* the
+        // per-channel COLORCORR triple before projecting.
+        let pixels = vec![6.0, 12.0, 15.0]; // = radiance(1,1,1) * 3 * (2,4,5)
+        let mut img = HdrImage::new_rgb96f(1, 1, pixels);
+        img.header.exposure = Some(3.0);
+        img.header.colorcorr = Some([2.0, 4.0, 5.0]);
+        let scene = img.scene_referred_luminance_buffer();
+        assert!((scene[0] - 179.0).abs() < 1e-2, "{}", scene[0]);
+    }
+
+    #[test]
+    fn scene_referred_luminance_xyze_uses_y_after_recovery() {
+        use crate::HdrFormat;
+        // XYZE: luminance is 179 * Y of the recovered channels. COLORCORR
+        // applies to the three stored channels (X,Y,Z) in order, matching
+        // `recover_original_colorcorr`.
+        let pixels = vec![0.2, 2.0, 0.6]; // Y stored = 2.0
+        let mut img = HdrImage::new_rgb96f(1, 1, pixels);
+        img.header.format = HdrFormat::Xyze;
+        img.header.exposure = Some(2.0);
+        img.header.colorcorr = Some([1.0, 4.0, 1.0]);
+        let scene = img.scene_referred_luminance_buffer();
+        // recovered Y = 2.0 / 2.0 / 4.0 = 0.25 ⇒ 179 * 0.25 = 44.75.
+        assert!((scene[0] - 179.0 * 0.25).abs() < 1e-2, "{}", scene[0]);
+    }
+
+    #[test]
+    fn scene_referred_luminance_treats_degenerate_records_as_identity() {
+        // A zero / non-finite cumulative factor must not poison the
+        // buffer with NaN / ∞ — it is treated as "no recovery applied",
+        // matching recover_original_radiance / recover_original_colorcorr.
+        let pixels = vec![1.0, 1.0, 1.0];
+        let mut img = HdrImage::new_rgb96f(1, 1, pixels);
+        img.header.exposure = Some(0.0);
+        img.header.colorcorr = Some([f32::NAN, 1.0, 1.0]);
+        let scene = img.scene_referred_luminance_buffer();
+        assert!(scene[0].is_finite(), "{}", scene[0]);
+        // Identity recovery ⇒ same as the file-referred luminance.
+        assert!((scene[0] - 179.0).abs() < 1e-2, "{}", scene[0]);
+    }
+
+    #[test]
     fn effective_pixaspect_defaults_to_one_when_absent() {
         // No PIXASPECT record → reference-manual default of 1.0.
         let img = HdrImage::new_rgb96f(1, 1, vec![0.0, 0.0, 0.0]);
@@ -751,5 +840,99 @@ impl HdrImage {
                 }
             }
         }
+    }
+
+    /// Allocate a fresh `width * height` buffer of per-pixel *physical*
+    /// photometric luminance values, in lumens per steradian per m²,
+    /// computed from the picture's **scene-referred** radiance — i.e.
+    /// after dividing out the multipliers the writer baked into the
+    /// stored channels — rather than from the stored float samples
+    /// directly.
+    ///
+    /// This is the spec-canonical composition of two rules in the staged
+    /// spec (`docs/image/hdr/radiance-hdr-rgbe-format.md`):
+    ///
+    /// 1. §1 (EXPOSURE / COLORCORR header rows): the stored channel
+    ///    `c_i` equals `radiance_i * EXPOSURE * COLORCORR_i` because both
+    ///    records are "already applied to" the pixels; "to recover
+    ///    original radiances (watts/sr/m²) divide file values by the
+    ///    product of all EXPOSURE settings", and COLORCORR is the
+    ///    complementary per-primary multiplier removed the same way. The
+    ///    decoder folds multiple records of each kind into the running
+    ///    product stored in [`HdrHeader::exposure`] /
+    ///    [`HdrHeader::colorcorr`], so a single division by each undoes
+    ///    the entire stack.
+    /// 2. §"Physical interpretation": the photometric luminance of a
+    ///    scene-referred radiance pixel is `179 * (0.265 R + 0.670 G +
+    ///    0.065 B)` for `FORMAT=32-bit_rle_rgbe` and `179 * Y` for
+    ///    `FORMAT=32-bit_rle_xyze`.
+    ///
+    /// Where [`Self::luminance_buffer`] applies the §"Physical
+    /// interpretation" formula to the stored float samples verbatim (the
+    /// right answer when no `EXPOSURE=` / `COLORCORR=` was baked in, or
+    /// when the caller wants file-referred luminance), this method first
+    /// reconstructs the original radiance the spec describes, so the
+    /// returned luminance is the genuine physical quantity for files that
+    /// do carry those records. When neither record is present (or both
+    /// are the identity) the two methods agree exactly.
+    ///
+    /// Non-mutating: the image's pixels and header are left untouched, so
+    /// it composes the
+    /// [`Self::recover_original_radiance`] / [`Self::recover_original_colorcorr`]
+    /// divide-to-undo rules without the in-place clear those methods
+    /// perform. A degenerate cumulative factor (`EXPOSURE` that is `0.0`
+    /// or non-finite, or any `COLORCORR` component that is `0.0` or
+    /// non-finite) is treated as "no recovery applied" for that record —
+    /// the same permissive handling [`Self::recover_original_radiance`] /
+    /// [`Self::recover_original_colorcorr`] use, so a malformed header can
+    /// never turn the luminance buffer into NaN / ∞.
+    pub fn scene_referred_luminance_buffer(&self) -> Vec<f32> {
+        // Reciprocal of the cumulative EXPOSURE multiplier (identity for
+        // absent / degenerate records), per spec §1 + the recovery
+        // contract of `recover_original_radiance`.
+        let inv_exposure = match self.header.exposure {
+            Some(e) if e != 0.0 && e.is_finite() => 1.0 / e,
+            _ => 1.0,
+        };
+        // Per-channel reciprocal of the cumulative COLORCORR triple
+        // (identity for absent / degenerate components), per spec §1 +
+        // the recovery contract of `recover_original_colorcorr`. The
+        // triple multiplies the three stored channels in order, matching
+        // `recover_original_colorcorr` for both RGBE (R,G,B) and XYZE
+        // (X,Y,Z) storage.
+        let inv_cc = match self.header.colorcorr {
+            Some([r, g, b]) => [
+                if r != 0.0 && r.is_finite() {
+                    1.0 / r
+                } else {
+                    1.0
+                },
+                if g != 0.0 && g.is_finite() {
+                    1.0 / g
+                } else {
+                    1.0
+                },
+                if b != 0.0 && b.is_finite() {
+                    1.0 / b
+                } else {
+                    1.0
+                },
+            ],
+            None => [1.0, 1.0, 1.0],
+        };
+        let n = (self.width as usize) * (self.height as usize);
+        let mut out = Vec::with_capacity(n);
+        for px in self.pixels.chunks_exact(3) {
+            let recovered = [
+                px[0] * inv_exposure * inv_cc[0],
+                px[1] * inv_exposure * inv_cc[1],
+                px[2] * inv_exposure * inv_cc[2],
+            ];
+            out.push(crate::xyz::luminance_lm_per_sr_per_m2(
+                recovered,
+                self.header.format,
+            ));
+        }
+        out
     }
 }

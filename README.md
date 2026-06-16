@@ -56,6 +56,7 @@ No external library source consulted.
 | `Primaries::SRGB` / `RADIANCE` / `P3_D65` / `REC2020` constants | n/a | constants |
 | Tone-mapping (Linear / Gamma / Reinhard / ReinhardExtended / ReinhardLuminance / Hable / Drago / ACES) | - | helpers |
 | Radiance photometric luminance (`179 * (0.265 R + 0.670 G + 0.065 B)` for RGBE; `179 * Y` for XYZE) | helper (`luminance_lm_per_sr_per_m2`, `HdrImage::luminance_buffer`) | n/a |
+| `HdrImage::scene_referred_luminance_buffer` — *physical* per-pixel luminance (lm/sr/m²) computed after dividing out the cumulative `EXPOSURE` product and per-channel `COLORCORR` triple the writer baked in, composing the staged spec's §1 recovery rules with the §"Physical interpretation" luminance formula (non-mutating; degenerate `0`/non-finite factors treated as identity; agrees with `luminance_buffer` when neither record is present) | helper | n/a |
 
 An opt-in, env-gated test suite cross-validates encode/decode against
 an external Radiance-capable image tool when one is present on `PATH`
