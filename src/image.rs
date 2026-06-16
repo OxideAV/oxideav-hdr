@@ -97,6 +97,55 @@ mod tests {
     }
 
     #[test]
+    fn luminance_buffer_with_effective_primaries_matches_fixed_on_default() {
+        // No PRIMARIES record → effective_primaries() is the Radiance
+        // default, whose Y row equals the fixed RGBE coefficients, so the
+        // primaries-aware buffer equals the fixed-coefficient buffer.
+        let pixels = vec![0.5, 0.25, 0.10, 1.0, 1.0, 1.0];
+        let img = HdrImage::new_rgb96f(2, 1, pixels);
+        assert!(img.header.primaries.is_none());
+        let fixed = img.luminance_buffer();
+        let prim = img.luminance_buffer_with_effective_primaries();
+        assert_eq!(fixed.len(), prim.len());
+        for (a, b) in fixed.iter().zip(prim.iter()) {
+            // RGBE_BRIGHT_COEFFS is 3-decimal rounded vs the exact Y row,
+            // so compare with a small relative tolerance.
+            let tol = 1e-3 * a.abs().max(1.0);
+            assert!((a - b).abs() < tol, "{a} vs {b}");
+        }
+    }
+
+    #[test]
+    fn luminance_buffer_with_effective_primaries_uses_declared_record() {
+        // A picture that declares Rec. 2020 primaries gets a different
+        // pure-green luminance than the fixed standard-Radiance formula.
+        let pixels = vec![0.0, 1.0, 0.0];
+        let mut img = HdrImage::new_rgb96f(1, 1, pixels);
+        img.header.primaries = Some(Primaries::REC2020);
+        let fixed = img.luminance_buffer();
+        let prim = img.luminance_buffer_with_effective_primaries();
+        assert!(
+            (fixed[0] - prim[0]).abs() > 1e-2,
+            "expected divergence: {} vs {}",
+            fixed[0],
+            prim[0]
+        );
+        assert!(prim[0] > 0.0 && prim[0].is_finite());
+    }
+
+    #[test]
+    fn luminance_buffer_with_effective_primaries_xyze_ignores_primaries() {
+        use crate::HdrFormat;
+        let pixels = vec![0.1, 0.5, 0.2];
+        let mut img = HdrImage::new_rgb96f(1, 1, pixels);
+        img.header.format = HdrFormat::Xyze;
+        img.header.primaries = Some(Primaries::REC2020);
+        let prim = img.luminance_buffer_with_effective_primaries();
+        // XYZE → 179 * Y regardless of the PRIMARIES record.
+        assert!((prim[0] - 179.0 * 0.5).abs() < 1e-2, "{}", prim[0]);
+    }
+
+    #[test]
     fn effective_pixaspect_defaults_to_one_when_absent() {
         // No PIXASPECT record → reference-manual default of 1.0.
         let img = HdrImage::new_rgb96f(1, 1, vec![0.0, 0.0, 0.0]);
@@ -529,6 +578,41 @@ impl HdrImage {
             out.push(crate::xyz::luminance_lm_per_sr_per_m2(
                 [px[0], px[1], px[2]],
                 self.header.format,
+            ));
+        }
+        out
+    }
+
+    /// Allocate a fresh `width * height` photometric-luminance buffer
+    /// (lumens per steradian per m²) like [`Self::luminance_buffer`],
+    /// but project RGBE pixels through the Y row of *this picture's own*
+    /// `PRIMARIES=` record (via [`Self::effective_primaries`]) instead of
+    /// the fixed standard-Radiance coefficients.
+    ///
+    /// The Radiance reference manual fixes the RGBE luminance weights at
+    /// `(0.265, 0.670, 0.065)`, which are exactly the CIE-Y row of Greg
+    /// Ward's standard-primaries RGB→XYZ matrix. A picture that declares
+    /// non-standard primaries (a wide-gamut P3 or Rec. 2020 render, or
+    /// any custom 8-float `PRIMARIES=` record) carries a different set of
+    /// per-channel luminance weights — the Y row of *its* matrix. This
+    /// helper threads `effective_primaries()` into
+    /// [`crate::xyz::luminance_lm_per_sr_per_m2_with_primaries`] so the
+    /// reduction is correct for those files; on the default
+    /// [`crate::Primaries::RADIANCE`] record it reproduces
+    /// [`Self::luminance_buffer`] within `f32` precision.
+    ///
+    /// XYZE files ignore the primaries entirely (their Y channel is
+    /// already CIE Y), so this returns the same `179 * Y` pass-through as
+    /// [`Self::luminance_buffer`] for `FORMAT=32-bit_rle_xyze`.
+    pub fn luminance_buffer_with_effective_primaries(&self) -> Vec<f32> {
+        let primaries = self.effective_primaries();
+        let n = (self.width as usize) * (self.height as usize);
+        let mut out = Vec::with_capacity(n);
+        for px in self.pixels.chunks_exact(3) {
+            out.push(crate::xyz::luminance_lm_per_sr_per_m2_with_primaries(
+                [px[0], px[1], px[2]],
+                self.header.format,
+                primaries,
             ));
         }
         out

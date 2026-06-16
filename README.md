@@ -56,6 +56,7 @@ No external library source consulted.
 | `Primaries::SRGB` / `RADIANCE` / `P3_D65` / `REC2020` constants | n/a | constants |
 | Tone-mapping (Linear / Gamma / Reinhard / ReinhardExtended / ReinhardLuminance / Hable / Drago / ACES) | - | helpers |
 | Radiance photometric luminance (`179 * (0.265 R + 0.670 G + 0.065 B)` for RGBE; `179 * Y` for XYZE) | helper (`luminance_lm_per_sr_per_m2`, `HdrImage::luminance_buffer`) | n/a |
+| Primaries-aware photometric luminance (the fixed RGBE weights `(0.265, 0.670, 0.065)` are the CIE-Y row of Greg Ward's standard-primaries RGB→XYZ matrix, so a non-standard `PRIMARIES=` record — wide-gamut P3 / Rec. 2020 / custom 8-float — has different luminance weights, namely the Y row of *its* matrix; `rgbe_luminance_coeffs_from_primaries` derives them, `luminance_lm_per_sr_per_m2_with_primaries` and `HdrImage::luminance_buffer_with_effective_primaries` apply them — XYZE ignores primaries since its Y is already CIE Y, degenerate records fall back to the fixed coefficients) | helper | n/a |
 
 An opt-in, env-gated test suite cross-validates encode/decode against
 an external Radiance-capable image tool when one is present on `PATH`

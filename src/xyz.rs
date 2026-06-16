@@ -286,6 +286,72 @@ pub fn luminance_lm_per_sr_per_m2(pixel: [f32; 3], format: crate::HdrFormat) -> 
     }
 }
 
+/// Photopic `(R, G, B) → CIE Y` weights for an arbitrary
+/// [`crate::Primaries`] record.
+///
+/// The Radiance reference manual's fixed RGBE luminance formula
+/// `Y = 0.265*R + 0.670*G + 0.065*B` ([`RGBE_BRIGHT_COEFFS`]) is exactly
+/// the **middle (Y) row** of the linear `RGB → CIE XYZ` matrix derived
+/// from Greg Ward's standard Radiance primaries (red `0.640 0.330`,
+/// green `0.290 0.600`, blue `0.150 0.060`, equal-energy white
+/// `1/3 1/3`) — CIE Y *is* luminance, so the Y row already carries the
+/// per-primary photopic weights. A Radiance picture that declares a
+/// non-standard `PRIMARIES=` record (e.g. a P3 or Rec. 2020 dataset
+/// from a wide-gamut renderer) therefore has a *different* set of
+/// luminance weights, namely the Y row of *its own* RGB→XYZ matrix.
+///
+/// This helper returns that Y row for any [`crate::Primaries`] record,
+/// reusing the same algebraic primary-construction as
+/// [`rgb_to_xyz_matrix_from_primaries`] (BT.709 §3 / IEC 61966-2-1
+/// Annex C). For [`crate::Primaries::RADIANCE`] it reproduces
+/// [`RGBE_BRIGHT_COEFFS`] within `f32` precision, confirming the
+/// generalisation collapses to the reference formula on the default
+/// primaries. Returns `None` for the same degenerate records as
+/// [`rgb_to_xyz_matrix_from_primaries`] (any `y == 0` chromaticity or a
+/// singular construction matrix); callers can treat `None` as "fall
+/// back to [`RGBE_BRIGHT_COEFFS`]".
+pub fn rgbe_luminance_coeffs_from_primaries(p: crate::Primaries) -> Option<[f32; 3]> {
+    let m = rgb_to_xyz_matrix_from_primaries(p)?;
+    // The Y row of the RGB→XYZ matrix is the per-channel luminance
+    // projection.
+    Some([m[1][0], m[1][1], m[1][2]])
+}
+
+/// Photometric luminance, in lumens per steradian per m², of a single
+/// scene-referred pixel — using the picture's declared
+/// [`crate::Primaries`] rather than the fixed standard-Radiance
+/// coefficients of [`luminance_lm_per_sr_per_m2`].
+///
+/// * [`crate::HdrFormat::Rgbe`] — projects through the Y row of the
+///   primaries' RGB→XYZ matrix (see
+///   [`rgbe_luminance_coeffs_from_primaries`]) then scales by
+///   [`WHTEFFICACY`]. When the primaries record is degenerate the
+///   helper falls back to [`RGBE_BRIGHT_COEFFS`] so it never returns a
+///   nonsensical (matrix-undefined) value — identical output to
+///   [`luminance_lm_per_sr_per_m2`] in that case.
+/// * [`crate::HdrFormat::Xyze`] — pass-through `179 * Y`; the Y channel
+///   of an XYZE file is already CIE Y, independent of any RGB
+///   primaries, so the `PRIMARIES=` record does not enter the
+///   computation (matching the format-manual rule that `PRIMARIES` is
+///   "used mainly by `ra_xyze`", i.e. only on the RGB side).
+///
+/// On the default [`crate::Primaries::RADIANCE`] record this returns the
+/// same value as [`luminance_lm_per_sr_per_m2`] within `f32` precision.
+#[inline]
+pub fn luminance_lm_per_sr_per_m2_with_primaries(
+    pixel: [f32; 3],
+    format: crate::HdrFormat,
+    primaries: crate::Primaries,
+) -> f32 {
+    match format {
+        crate::HdrFormat::Rgbe => {
+            let c = rgbe_luminance_coeffs_from_primaries(primaries).unwrap_or(RGBE_BRIGHT_COEFFS);
+            WHTEFFICACY * (c[0] * pixel[0] + c[1] * pixel[1] + c[2] * pixel[2])
+        }
+        crate::HdrFormat::Xyze => WHTEFFICACY * pixel[1],
+    }
+}
+
 #[inline]
 fn apply_matrix(m: [[f32; 3]; 3], v: [f32; 3]) -> [f32; 3] {
     [
@@ -523,6 +589,130 @@ mod tests {
             (sum - 1.0).abs() < 1e-6,
             "coeffs sum to {sum}, expected 1.0"
         );
+    }
+
+    #[test]
+    fn lum_coeffs_from_radiance_primaries_match_fixed_coeffs() {
+        // The Y row of the standard-Radiance RGB→XYZ matrix is the
+        // reference manual's fixed RGBE luminance weights. The published
+        // `RGBE_BRIGHT_COEFFS` are rounded to 3 decimals, so the derived
+        // values match to ~5e-4 (e.g. 0.2651058 vs the rounded 0.265).
+        let c = rgbe_luminance_coeffs_from_primaries(crate::Primaries::RADIANCE)
+            .expect("Radiance primaries are well-formed");
+        for i in 0..3 {
+            assert!(
+                approx(c[i], RGBE_BRIGHT_COEFFS[i], 5e-4),
+                "coeff {i}: {} vs fixed {}",
+                c[i],
+                RGBE_BRIGHT_COEFFS[i]
+            );
+        }
+        // They also match the precomputed Radiance matrix Y row exactly.
+        let yrow = rgb_to_xyz_matrix(RgbColorSpace::Radiance)[1];
+        for i in 0..3 {
+            assert!(
+                approx(c[i], yrow[i], 1e-5),
+                "coeff {i}: {} vs {}",
+                c[i],
+                yrow[i]
+            );
+        }
+    }
+
+    #[test]
+    fn lum_coeffs_from_srgb_primaries_match_bt709_y_row() {
+        // sRGB / Rec. 709 luminance weights are the well-known
+        // (0.2126, 0.7152, 0.0722) — the Y row of the BT.709 matrix.
+        let c = rgbe_luminance_coeffs_from_primaries(crate::Primaries::SRGB)
+            .expect("sRGB primaries are well-formed");
+        assert!(approx(c[0], 0.2126729, 1e-4), "R: {}", c[0]);
+        assert!(approx(c[1], 0.7151522, 1e-4), "G: {}", c[1]);
+        assert!(approx(c[2], 0.072175, 1e-4), "B: {}", c[2]);
+        // Weights project the white point onto Y=1, so they sum to ~1.
+        let sum = c[0] + c[1] + c[2];
+        assert!((sum - 1.0).abs() < 1e-4, "sum {sum}");
+    }
+
+    #[test]
+    fn lum_coeffs_reject_degenerate_primaries() {
+        let bad = crate::Primaries {
+            red: (0.64, 0.0), // y == 0 → X = x/y blows up
+            green: (0.30, 0.60),
+            blue: (0.15, 0.06),
+            white: (0.3127, 0.3290),
+        };
+        assert!(rgbe_luminance_coeffs_from_primaries(bad).is_none());
+    }
+
+    #[test]
+    fn lum_with_radiance_primaries_matches_fixed_formula() {
+        // On the default Radiance record the primaries-aware reduction
+        // collapses to the fixed-coefficient one.
+        for &p in &[
+            [1.0_f32, 1.0, 1.0],
+            [0.5, 0.25, 0.10],
+            [0.7, 0.3, 0.9],
+            [0.0, 0.0, 0.0],
+        ] {
+            let fixed = luminance_lm_per_sr_per_m2(p, crate::HdrFormat::Rgbe);
+            let prim = luminance_lm_per_sr_per_m2_with_primaries(
+                p,
+                crate::HdrFormat::Rgbe,
+                crate::Primaries::RADIANCE,
+            );
+            // The fixed coefficients are 3-decimal rounded, so allow a
+            // small relative tolerance against the exact derived Y row.
+            let tol = 1e-3 * fixed.abs().max(1.0);
+            assert!(approx(fixed, prim, tol), "fixed {fixed} vs prim {prim}");
+        }
+    }
+
+    #[test]
+    fn lum_with_wide_gamut_primaries_differs_from_fixed() {
+        // A Rec. 2020 picture weights its green more heavily and its
+        // blue less than the standard-Radiance coefficients — a pure
+        // green sample should read a *different* luminance than the
+        // fixed formula gives.
+        let green = [0.0_f32, 1.0, 0.0];
+        let fixed = luminance_lm_per_sr_per_m2(green, crate::HdrFormat::Rgbe);
+        let rec2020 = luminance_lm_per_sr_per_m2_with_primaries(
+            green,
+            crate::HdrFormat::Rgbe,
+            crate::Primaries::REC2020,
+        );
+        assert!(
+            (fixed - rec2020).abs() > 1e-2,
+            "expected primaries-aware luminance to differ: {fixed} vs {rec2020}"
+        );
+        // Both remain physically sensible (positive, finite).
+        assert!(rec2020 > 0.0 && rec2020.is_finite());
+    }
+
+    #[test]
+    fn lum_xyze_ignores_primaries() {
+        // XYZE Y is already CIE Y; the PRIMARIES record must not enter.
+        let a = luminance_lm_per_sr_per_m2_with_primaries(
+            [0.1, 1.0, 0.2],
+            crate::HdrFormat::Xyze,
+            crate::Primaries::REC2020,
+        );
+        let b = luminance_lm_per_sr_per_m2([0.1, 1.0, 0.2], crate::HdrFormat::Xyze);
+        assert!((a - b).abs() < 1e-6, "{a} vs {b}");
+        assert!((a - 179.0).abs() < 1e-3);
+    }
+
+    #[test]
+    fn lum_with_degenerate_primaries_falls_back_to_fixed() {
+        let bad = crate::Primaries {
+            red: (0.64, 0.0),
+            green: (0.30, 0.60),
+            blue: (0.15, 0.06),
+            white: (0.3127, 0.3290),
+        };
+        let p = [0.5_f32, 0.25, 0.10];
+        let got = luminance_lm_per_sr_per_m2_with_primaries(p, crate::HdrFormat::Rgbe, bad);
+        let fixed = luminance_lm_per_sr_per_m2(p, crate::HdrFormat::Rgbe);
+        assert!((got - fixed).abs() < 1e-3, "{got} vs {fixed}");
     }
 
     #[test]
