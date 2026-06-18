@@ -42,11 +42,11 @@ each flavour compresses on the wire.
 | 64×64 solid | new-RLE | 19.0 µs | 2.41 GiB/s | 4.63 |
 | 64×64 solid | old-RLE | 19.5 µs | 2.34 GiB/s | 4.77 |
 | 64×64 solid | uncompressed | 20.5 µs | 2.24 GiB/s | 4.99 |
-| 256×256 gradient | new-RLE | 211 µs | 3.48 GiB/s | 3.21 |
-| 256×256 gradient | old-RLE | 308 µs | 2.38 GiB/s | 4.70 |
-| 256×256 gradient | uncompressed | 266 µs | 2.76 GiB/s | 4.05 |
-| 1024×1024 solid | new-RLE | 3.78 ms | 3.10 GiB/s | 3.61 |
-| 1024×1024 solid | old-RLE | 3.79 ms | 3.09 GiB/s | 3.62 |
+| 256×256 gradient | new-RLE | 169 µs | 4.35 GiB/s | 2.57 |
+| 256×256 gradient | old-RLE | 309 µs | 2.38 GiB/s | 4.72 |
+| 256×256 gradient | uncompressed | 264 µs | 2.78 GiB/s | 4.03 |
+| 1024×1024 solid | new-RLE | 2.35 ms | 4.98 GiB/s | 2.24 |
+| 1024×1024 solid | old-RLE | 2.30 ms | 5.09 GiB/s | 2.20 |
 | 1024×1024 solid | uncompressed | 3.99 ms | 2.94 GiB/s | 3.81 |
 
 ### Encode (`encode_hdr_with_rle`)
@@ -100,7 +100,7 @@ Per-pixel cost across the whole crate surface, slowest first
 | 8 | decode old-RLE / encode uncompressed | 4.7 | Sentinel probe per quad / literal quad emit. |
 | 9 | encode old-RLE / decode uncompressed | 4.1 / 4.05 | |
 | 10 | `tonemap::linear` | 3.7 | No `powf` anywhere — confirms `powf` is the operator floor, not `tone_map`'s loop or the output `Vec` push. |
-| 11 | decode new-RLE | 3.2–3.6 | Long-run 1024×1024 decode (3.61) is *no faster* than literal-heavy gradient (3.21): wall time is dominated by the per-pixel RGBE→f32 reconstruct + channel re-interleave, not wire parsing. |
+| 11 | decode new-RLE / old-RLE | 2.2–2.6 | Repeat-run decode now bulk-fills each channel with one `resize` (`memset`) instead of a byte-at-a-time `push` loop (round 332): the 1024×1024 solid decode dropped to 2.24 (new-RLE) / 2.20 (old-RLE) ns/px — a ~38 % wall-time cut on run-heavy inputs — so the remaining cost is the per-pixel RGBE→f32 reconstruct + channel re-interleave, not the run expansion. The literal-heavy uncompressed path (no runs) is unchanged at 3.81. |
 | 12 | `convert_image_rgb_to_xyz` / `xyz_to_rgb` | 0.34 | 9 mul + 6 add per pixel; effectively memory-bandwidth bound. Saturated. |
 
 ## Next PROFILE-OPT target
@@ -125,5 +125,9 @@ staging-buffer plumbing rather than wire parsing (rank-11 observation),
 so a future round can fuse the per-channel buffers into a direct
 pixel-buffer write.
 
-Behavioural guarantee: this round touched `benches/` + docs only —
-`src/` is byte-identical to round 275.
+Round 332 landed the rank-11 repeat-run bulk-fill micro-opt above
+(`src/rle.rs` `decode_new_rle` / `decode_old_rle`): the byte-at-a-time
+`push` loops became single `Vec::resize` calls. Behavioural guarantee:
+the decode output is bit-identical (only the fill mechanism changed),
+covered by `new_rle_long_repeat_run_bulk_fill` /
+`old_rle_long_repeat_run_bulk_fill` plus the existing round-trip suite.

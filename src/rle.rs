@@ -235,9 +235,14 @@ fn decode_new_rle(
                 }
                 let value = src[*pos];
                 *pos += 1;
-                for _ in 0..run {
-                    ch.push(value);
-                }
+                // Bulk-fill the repeat run in one shot. `resize` lowers
+                // to a `memset` over the freshly-grown tail, where the
+                // byte-at-a-time `push` loop the decoder previously ran
+                // re-checked the `Vec` capacity on every iteration. The
+                // capacity is already reserved (`with_capacity(width)`
+                // up front, and `written + run <= width` is enforced
+                // above), so no reallocation happens here.
+                ch.resize(ch.len() + run, value);
                 written += run;
             } else {
                 let run = code as usize;
@@ -307,12 +312,16 @@ fn decode_old_rle(
             if written + run > width {
                 return Err(Error::invalid("HDR: old-RLE repeat overruns scanline"));
             }
-            for _ in 0..run {
-                out[0].push(last[0]);
-                out[1].push(last[1]);
-                out[2].push(last[2]);
-                out[3].push(last[3]);
-            }
+            // Bulk-fill each channel's repeat run with one `resize`
+            // (`memset` over the grown tail) instead of a byte-at-a-time
+            // `push` loop that re-checked four `Vec` capacities per
+            // repeated pixel. Capacity is reserved up front
+            // (`with_capacity(width)`) and `written + run <= width` is
+            // enforced just above, so no channel reallocates here.
+            out[0].resize(out[0].len() + run, last[0]);
+            out[1].resize(out[1].len() + run, last[1]);
+            out[2].resize(out[2].len() + run, last[2]);
+            out[3].resize(out[3].len() + run, last[3]);
             written += run;
             // Note: we do NOT reset `shift` here. The Radiance grammar
             // chains sentinels until the next non-sentinel pixel; the
@@ -544,6 +553,54 @@ mod tests {
         let back = decode_scanline(&encoded, &mut pos, 16, &mut prev).unwrap();
         assert_eq!(back, chans);
         assert_eq!(pos, encoded.len());
+    }
+
+    #[test]
+    fn new_rle_long_repeat_run_bulk_fill() {
+        // A repeat run that spans most of a wide scanline exercises the
+        // `resize` bulk-fill path: the channel must grow by exactly the
+        // run length with the repeated byte, never overrun the reserved
+        // capacity, and decode back to the original solid channel.
+        let chans = [
+            vec![0x91u8; 600],
+            vec![0x12u8; 600],
+            vec![0xEEu8; 600],
+            vec![0x80u8; 600],
+        ];
+        let mut encoded = Vec::new();
+        encode_scanline(&chans, 600, &mut encoded).unwrap();
+        let mut pos = 0;
+        let mut prev = None;
+        let back = decode_scanline(&encoded, &mut pos, 600, &mut prev).unwrap();
+        assert_eq!(back, chans);
+        for ch in &back {
+            assert_eq!(ch.len(), 600);
+        }
+        assert_eq!(pos, encoded.len());
+    }
+
+    #[test]
+    fn old_rle_long_repeat_run_bulk_fill() {
+        // After one literal pixel, a long identical tail forces the
+        // old-RLE chained-sentinel decode to bulk-`resize` each of the
+        // four channels. Pin the grown length and the repeated values.
+        let mut chans: [Vec<u8>; 4] = [
+            vec![0x33; 500],
+            vec![0x44; 500],
+            vec![0x55; 500],
+            vec![0x80; 500],
+        ];
+        chans[0][0] = 0x10;
+        chans[1][0] = 0x20;
+        chans[2][0] = 0x30;
+        let w = chans[0].len();
+        let mut encoded = Vec::new();
+        encode_scanline_old_rle(&chans, w, &mut encoded).unwrap();
+        let back = decode_old_rle_only(&encoded, w);
+        assert_eq!(back, chans);
+        for ch in &back {
+            assert_eq!(ch.len(), 500);
+        }
     }
 
     #[test]
