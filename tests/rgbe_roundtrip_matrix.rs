@@ -198,6 +198,49 @@ fn rgbe_quads_round_trip_under_crlf_line_endings() {
 }
 
 #[test]
+fn xyze_quads_round_trip_bit_exactly_across_orientation_and_rle() {
+    // XYZE files store CIE XYZ tristimulus in the *same* shared-exponent
+    // quad layout as RGBE; the scanline codec is format-agnostic at the
+    // byte layer, so the quad stream must survive byte-for-byte and the
+    // FORMAT=32-bit_rle_xyze tag must round-trip. (The XYZ<->RGB matrix
+    // conversion is a separate, lossy float-domain step the caller opts
+    // into; it is intentionally NOT exercised here.)
+    use oxideav_hdr::HdrFormat;
+    let mut rng = Lcg::new(0x5A5A);
+    for &(w, h) in &[(8u32, 8u32), (16, 5), (4, 11), (11, 1)] {
+        let quads = normalised_quads(&mut rng, (w * h) as usize);
+        for &orientation in &ORIENTATIONS {
+            for &rle in &RLE_MODES {
+                let on_disk_scanline_w = if orientation.is_x_first() { h } else { w };
+                if rle == RleMode::New && !(8..=32767).contains(&on_disk_scanline_w) {
+                    continue;
+                }
+                let mut header = HdrHeader {
+                    format: HdrFormat::Xyze,
+                    ..HdrHeader::default()
+                };
+                header.set_orientation(orientation);
+                let img = HdrImage::from_rgbe_quads(w, h, &quads, header);
+                let bytes = encode_hdr_with_options(&img, rle, LineEnding::Lf)
+                    .unwrap_or_else(|e| panic!("xyze encode {w}x{h} {orientation:?} {rle:?}: {e}"));
+                let back = parse_hdr_with_options(&bytes, fallback_for(rle))
+                    .unwrap_or_else(|e| panic!("xyze decode {w}x{h} {orientation:?} {rle:?}: {e}"));
+                assert_eq!(
+                    back.header.format,
+                    HdrFormat::Xyze,
+                    "{w}x{h} {orientation:?} {rle:?}: FORMAT tag lost"
+                );
+                assert_eq!(
+                    back.to_rgbe_quads(),
+                    quads,
+                    "{w}x{h} {orientation:?} {rle:?}: XYZE quads drifted"
+                );
+            }
+        }
+    }
+}
+
+#[test]
 fn rgbe_quads_round_trip_preserves_typed_header_records() {
     // The byte-exact quad contract must coexist with the typed-header
     // round-trip: build a picture from quads, stamp every typed slot, and
