@@ -37,6 +37,7 @@ No external library source consulted.
 | All 8 axis-flag combinations |  Y   |  Y (Y-first + X-first transpose) |
 | `Orientation` enum naming all 8 resolution-string forms (`Standard` = `-Y N +X M`, `FlipX`, `Rotate180`, `FlipY`, `Rotate90Cw`, `Rotate90CwFlipY`, `Rotate90Ccw`, `Rotate90CcwFlipY` per the format note's §2 table) with `from_axis_fields` / `to_axis_fields` (a total mutual inverse over the `(y_sign, x_sign, x_first)` triple), `is_x_first`, `resolution_template`, plus `HdrHeader::orientation` / `set_orientation` to read or set the on-disk scanline layout by geometric name | helper | helper |
 | 32-bit_rle_rgbe pixels       |  Y   |   Y   |
+| `HdrImage::from_rgbe_quads` / `to_rgbe_quads` (byte-level view of the picture: build a float image from exact on-disk `[R, G, B, E]` quads, or re-derive the quad stream the encoder commits to the wire — a **bit-exact** RGBE round-trip surface alongside the lossy float-in/float-out path, since `rgb_to_rgbe` is idempotent on the normalised quads the encoder produces) | helper | helper |
 | `rgbe_unbiased_exponent([u8; 4]) -> Option<i32>` (returns the spec-§3 `byte - 128` shared exponent, or `None` for the all-zero sentinel pixel — `Some(1)` for the spec-canonical worked example `(128, 64, 32, 129)`) | inspector | n/a |
 | `rgbe_is_zero_pixel([u8; 4]) -> bool` (`bool`-returning sentinel inspector keying off `rgbe[3] == 0` per spec §3's "no valid pixel with exponent byte 0" rule — the boolean counterpart to `rgbe_unbiased_exponent` for call sites that don't need the exponent value) | inspector | n/a |
 | `rgbe_channel_scale([u8; 4]) -> Option<f32>` (the spec-§3 decode-formula factor `f = ldexp(1.0, byte − (128 + 8))` such that each channel equals `mantissa * f`, or `None` for the all-zero sentinel — `Some(2⁻⁷)` for the spec-canonical worked example `(128, 64, 32, 129)`; completes the quad-inspector trio) | inspector | n/a |
@@ -58,6 +59,24 @@ No external library source consulted.
 | Tone-mapping (Linear / Gamma / Reinhard / ReinhardExtended / ReinhardLuminance / Hable / Drago / ACES) | - | helpers |
 | Radiance photometric luminance (`179 * (0.265 R + 0.670 G + 0.065 B)` for RGBE; `179 * Y` for XYZE) | helper (`luminance_lm_per_sr_per_m2`, `HdrImage::luminance_buffer`) | n/a |
 | `HdrImage::scene_referred_luminance_buffer` — *physical* per-pixel luminance (lm/sr/m²) computed after dividing out the cumulative `EXPOSURE` product and per-channel `COLORCORR` triple the writer baked in, composing the staged spec's §1 recovery rules with the §"Physical interpretation" luminance formula (non-mutating; degenerate `0`/non-finite factors treated as identity; agrees with `luminance_buffer` when neither record is present) | helper | n/a |
+
+### Bit-exact RGBE-quad round-trip matrix
+
+The float-in / float-out API (`encode_hdr` / `parse_hdr`) is inherently
+lossy — the 8-bit shared-exponent mantissa quantises each pixel. The
+**byte** layer is not: every scanline flavour (new-RLE, old-RLE,
+uncompressed) is a lossless re-packing of the exact `[R, G, B, E]`
+quads, and `rgb_to_rgbe` is idempotent on the normalised quad subset the
+encoder produces (dominant mantissa `≥ 128`, decoded magnitude above the
+`1e-32` black floor). `tests/rgbe_roundtrip_matrix.rs` proves the
+resulting contract end-to-end: a picture built from normalised quads via
+`HdrImage::from_rgbe_quads`, encoded, decoded, and read back with
+`to_rgbe_quads`, reproduces the original quad stream **byte-for-byte**
+across the cross-product of resolution variants × all eight
+resolution-string orientations × every RLE flavour, for both RGBE and
+XYZE pictures, under LF and CRLF line endings, and alongside the full
+typed-header round-trip. The quad streams come from a small
+deterministic in-tree LCG (no external property-test crate).
 
 An opt-in, env-gated test suite cross-validates encode/decode against
 an external Radiance-capable image tool when one is present on `PATH`
