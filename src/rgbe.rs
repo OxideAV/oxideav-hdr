@@ -174,6 +174,21 @@ pub fn rgbe_to_rgb(rgbe: [u8; 4]) -> [f32; 3] {
 /// Encode one linear RGB triple into the four-byte shared-exponent
 /// representation. Negative or non-finite inputs are clamped to zero
 /// before encoding (the format has no representation for either).
+///
+/// ## Idempotence on normalised quads
+///
+/// The quantiser is **idempotent over the subset of RGBE quads it
+/// produces**: `frexp` always normalises the dominant channel's mantissa
+/// into `[128, 256)`, so for any quad whose dominant mantissa is `>= 128`
+/// and whose decoded magnitude is above the `1e-32` black floor,
+/// `rgb_to_rgbe(rgbe_to_rgb(q)) == q` holds bit-exactly. This is what
+/// makes the byte-level round-trip surface
+/// ([`crate::HdrImage::from_rgbe_quads`] /
+/// [`crate::HdrImage::to_rgbe_quads`]) lossless: a picture built from
+/// such quads re-encodes to exactly the same bytes. Quads outside the
+/// subset (a denormalised mantissa with no channel at `>= 128`, or a
+/// decoded magnitude below `1e-32`) re-encode to a renormalised /
+/// black-flushed quad instead.
 #[inline]
 pub fn rgb_to_rgbe(rgb: [f32; 3]) -> [u8; 4] {
     let r = sanitize(rgb[0]);
@@ -547,6 +562,47 @@ mod tests {
         assert_eq!(rgbe[1] as f32 * f, 2.0);
         assert_eq!(rgbe[2] as f32 * f, 1.0);
         assert_eq!(rgbe_channel_scale(rgb_to_rgbe([0.0, 0.0, 0.0])), None);
+    }
+
+    #[test]
+    fn normalised_quad_encode_decode_is_idempotent() {
+        // The bit-exact contract that `HdrImage::{from,to}_rgbe_quads`
+        // and the round-trip matrix rest on: for any *normalised* quad
+        // (dominant mantissa >= 128, decoded magnitude above the 1e-32
+        // black floor) `rgb_to_rgbe(rgbe_to_rgb(q)) == q` exactly. The
+        // encoder always produces quads in this subset (frexp normalises
+        // the dominant channel into [128, 256)), so a picture built from
+        // such quads re-encodes byte-for-byte. Walk a dense grid of
+        // exponents and mantissa shapes that all sit in the subset.
+        for e in 23u8..=255 {
+            // e >= 23 keeps the dominant mantissa-128 magnitude
+            // (2^(e-129)) at or above the 1e-32 floor.
+            for &dom in &[128u8, 150, 200, 255] {
+                let shapes = [
+                    [dom, dom / 2, dom / 4, e],
+                    [dom / 4, dom, dom / 2, e],
+                    [dom / 2, dom / 4, dom, e],
+                    [dom, dom, dom, e],
+                    [dom, 0, 0, e],
+                    [0, dom, 0, e],
+                    [0, 0, dom, e],
+                ];
+                for q in shapes {
+                    let back = rgb_to_rgbe(rgbe_to_rgb(q));
+                    assert_eq!(back, q, "idempotence drifted for quad {q:?}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn sub_floor_quad_flushes_to_black_on_re_encode() {
+        // The lower boundary of the idempotent subset: a quad whose
+        // decoded magnitude is below the 1e-32 black floor re-encodes to
+        // the all-zero sentinel rather than to itself. Byte 1 (unbiased
+        // -127) with mantissa 255 decodes to ~1.5e-38 < 1e-32.
+        let q = [255u8, 255, 255, 1];
+        assert_eq!(rgb_to_rgbe(rgbe_to_rgb(q)), [0, 0, 0, 0]);
     }
 
     #[test]

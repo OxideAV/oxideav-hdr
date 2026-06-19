@@ -17,6 +17,101 @@ mod tests {
     use super::*;
 
     #[test]
+    fn to_rgbe_quads_matches_per_pixel_encoder() {
+        // The quad stream must be bit-identical to running rgb_to_rgbe on
+        // each pixel in top-down order — the same quads the encoder writes.
+        use crate::rgbe::rgb_to_rgbe;
+        let pixels = vec![1.0_f32, 0.5, 0.25, 4.0, 2.0, 1.0, 0.0, 0.0, 0.0];
+        let img = HdrImage::new_rgb96f(3, 1, pixels.clone());
+        let quads = img.to_rgbe_quads();
+        assert_eq!(quads.len(), 3);
+        for (i, px) in pixels.chunks_exact(3).enumerate() {
+            assert_eq!(quads[i], rgb_to_rgbe([px[0], px[1], px[2]]), "pixel {i}");
+        }
+        // Spec §3 worked example: (1.0, 0.5, 0.25) -> (128, 64, 32, 129).
+        assert_eq!(quads[0], [128, 64, 32, 129]);
+        // Black pixel -> all-zero sentinel.
+        assert_eq!(quads[2], [0, 0, 0, 0]);
+    }
+
+    #[test]
+    fn from_rgbe_quads_decodes_each_quad() {
+        // Building from quads must decode each with rgbe_to_rgb into the
+        // float buffer, top-down.
+        use crate::rgbe::rgbe_to_rgb;
+        let quads = [[128, 64, 32, 129], [200, 100, 50, 130], [0, 0, 0, 0]];
+        let img = HdrImage::from_rgbe_quads(3, 1, &quads, HdrHeader::default());
+        assert_eq!(img.width, 3);
+        assert_eq!(img.height, 1);
+        assert_eq!(img.pixels.len(), 9);
+        for (i, &q) in quads.iter().enumerate() {
+            let rgb = rgbe_to_rgb(q);
+            assert_eq!(&img.pixels[i * 3..i * 3 + 3], &rgb[..], "pixel {i}");
+        }
+        // The worked-example quad decodes to (1.0, 0.5, 0.25).
+        assert_eq!(&img.pixels[0..3], &[1.0, 0.5, 0.25]);
+    }
+
+    #[test]
+    fn rgbe_quads_round_trip_bit_exactly_for_normalised_quads() {
+        // The core bit-exact contract: a picture built from normalised
+        // RGBE quads (dominant mantissa >= 128, magnitude above the 1e-32
+        // black floor) re-encodes to *exactly* the same quads. Walk a
+        // representative spread of exponents and mantissa shapes. The
+        // smallest exponent byte sampled is 64: byte 1 (unbiased -127)
+        // decodes to ~2^-128, below the 1e-32 floor rgb_to_rgbe flushes
+        // to black, so it is intentionally *not* a member of the
+        // bit-exact subset (the floor boundary is pinned by a dedicated
+        // test below).
+        let mut quads = Vec::new();
+        for e in [64u8, 128, 129, 200, 255] {
+            for &dom in &[128u8, 200, 255] {
+                quads.push([dom, dom / 2, dom / 4, e]);
+                quads.push([dom / 4, dom, dom / 2, e]);
+                quads.push([dom / 2, dom / 4, dom, e]);
+            }
+        }
+        // Include the black sentinel — it round-trips to itself too.
+        quads.push([0, 0, 0, 0]);
+        let n = quads.len() as u32;
+        let img = HdrImage::from_rgbe_quads(n, 1, &quads, HdrHeader::default());
+        let back = img.to_rgbe_quads();
+        assert_eq!(back, quads, "normalised-quad round-trip drifted");
+    }
+
+    #[test]
+    fn rgbe_quads_below_black_floor_flush_to_sentinel() {
+        // A normalised-mantissa quad whose *decoded* magnitude sits below
+        // the 1e-32 floor rgb_to_rgbe enforces does NOT round-trip to
+        // itself — it collapses to the all-zero sentinel. Exponent byte 1
+        // (unbiased -127) with the maximal mantissa 255 decodes to
+        // ~255/256 * 2^-127 ≈ 1.5e-38, comfortably below 1e-32, so the
+        // re-encode flushes it to black. This pins the lower boundary of
+        // the bit-exact subset.
+        let quads = [[255u8, 255, 255, 1]];
+        let img = HdrImage::from_rgbe_quads(1, 1, &quads, HdrHeader::default());
+        let back = img.to_rgbe_quads();
+        assert_eq!(
+            back[0],
+            [0, 0, 0, 0],
+            "sub-floor quad should flush to sentinel"
+        );
+    }
+
+    #[test]
+    fn from_rgbe_quads_preserves_supplied_header() {
+        let header = HdrHeader {
+            format: crate::HdrFormat::Xyze,
+            exposure: Some(2.5),
+            ..HdrHeader::default()
+        };
+        let quads = [[128, 64, 32, 129]];
+        let img = HdrImage::from_rgbe_quads(1, 1, &quads, header.clone());
+        assert_eq!(img.header.format, crate::HdrFormat::Xyze);
+        assert_eq!(img.header.exposure, Some(2.5));
+    }
+
+    #[test]
     fn apply_exposure_scales_pixels_and_clears_header() {
         let mut img = HdrImage::new_rgb96f(1, 2, vec![1.0, 0.5, 0.25, 2.0, 1.0, 0.5]);
         img.header.exposure = Some(0.5);
@@ -662,6 +757,79 @@ impl HdrImage {
             pixels,
             header: HdrHeader::default(),
         }
+    }
+
+    /// Construct a top-down RGB f32 image directly from a slice of
+    /// on-disk RGBE quads, decoding each `[R, G, B, E]` byte tuple through
+    /// the shared-exponent decode formula
+    /// (`docs/image/hdr/radiance-hdr-rgbe-format.md` §3) into the float
+    /// pixel buffer.
+    ///
+    /// `quads` is `width * height` long, in canonical top-down,
+    /// left-to-right pixel order (the same order
+    /// [`Self::to_rgbe_quads`] returns). Each quad is decoded with
+    /// [`crate::rgbe::rgbe_to_rgb`], so an all-zero / zero-exponent quad
+    /// becomes the black pixel `[0.0, 0.0, 0.0]` per the spec's "exponent
+    /// byte 0 ⇒ no value" sentinel rule.
+    ///
+    /// This is the byte-faithful inverse of [`Self::to_rgbe_quads`]:
+    /// because the shared-exponent codec is idempotent on normalised
+    /// quads (the encoder always emits a dominant mantissa in
+    /// `[128, 256)` and a decoded magnitude above the `1e-32` black
+    /// floor — see [`crate::rgbe::rgb_to_rgbe`]), a picture built from
+    /// such quads re-encodes to *exactly* the same quads. Callers that
+    /// need a bit-exact RGBE round-trip (rather than the inherently lossy
+    /// float-in / float-out path) build with this constructor and verify
+    /// with [`Self::to_rgbe_quads`].
+    ///
+    /// The header is taken verbatim; the caller is responsible for any
+    /// `FORMAT` / orientation flags it wants on the re-encode.
+    ///
+    /// # Panics
+    ///
+    /// Debug-asserts that `quads.len() == width * height`.
+    pub fn from_rgbe_quads(width: u32, height: u32, quads: &[[u8; 4]], header: HdrHeader) -> Self {
+        debug_assert_eq!(quads.len(), (width as usize) * (height as usize));
+        let mut pixels = Vec::with_capacity(quads.len() * 3);
+        for &q in quads {
+            let rgb = crate::rgbe::rgbe_to_rgb(q);
+            pixels.push(rgb[0]);
+            pixels.push(rgb[1]);
+            pixels.push(rgb[2]);
+        }
+        Self {
+            width,
+            height,
+            pixel_format: HdrPixelFormat::Rgb96f,
+            pixels,
+            header,
+        }
+    }
+
+    /// Re-derive the on-disk RGBE quad for every pixel, in canonical
+    /// top-down, left-to-right order — the byte-level view of the picture
+    /// the encoder will commit to the wire (modulo the chosen scanline
+    /// RLE flavour, which is a lossless re-packing of these exact quads).
+    ///
+    /// Each float triple is run through [`crate::rgbe::rgb_to_rgbe`], the
+    /// same shared-exponent quantiser [`crate::encode_hdr`] applies per
+    /// pixel, so the returned `Vec<[u8; 4]>` is bit-identical to the quad
+    /// stream a fresh encode would produce. Pairs with
+    /// [`Self::from_rgbe_quads`] to give callers a bit-exact RGBE
+    /// round-trip surface: `from_rgbe_quads(.., q, ..).to_rgbe_quads()`
+    /// returns `q` unchanged for every normalised quad (the property the
+    /// `tests/rgbe_roundtrip_matrix.rs` matrix pins across resolution /
+    /// orientation / RLE-flavour variants).
+    ///
+    /// Returns `width * height` quads. A black pixel maps to the all-zero
+    /// sentinel `[0, 0, 0, 0]`.
+    pub fn to_rgbe_quads(&self) -> Vec<[u8; 4]> {
+        let n = (self.width as usize) * (self.height as usize);
+        let mut out = Vec::with_capacity(n);
+        for px in self.pixels.chunks_exact(3) {
+            out.push(crate::rgbe::rgb_to_rgbe([px[0], px[1], px[2]]));
+        }
+        out
     }
 
     /// Apply the header's `EXPOSURE` factor to every float channel and
