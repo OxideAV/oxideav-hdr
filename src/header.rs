@@ -204,6 +204,175 @@ impl Orientation {
             Self::Rotate90CcwFlipY => "+X %d -Y %d",
         }
     }
+
+    /// The geometric symmetry that carries the **standard** picture
+    /// (`Self::Standard`, the right-side-up displayed image) onto the
+    /// picture this orientation describes, per the format note's §2 table
+    /// (`docs/image/hdr/radiance-hdr-rgbe-format.md`). For example
+    /// [`Orientation::Rotate90Cw`] describes a picture that is the standard
+    /// image rotated 90° clockwise, so its display transform is
+    /// [`GeometricOp::Rotate90Cw`].
+    ///
+    /// Composing this transform with [`GeometricOp::inverse`] is exactly
+    /// what [`crate::HdrImage::reorient`] uses to move a decoded buffer
+    /// between any two of the eight orientations: go from the source
+    /// orientation back to standard (the inverse), then forward to the
+    /// target orientation. Because the eight transforms form the dihedral
+    /// group of the rectangle (the order-8 symmetry group `D₄`), every
+    /// such move is itself one of the eight ops.
+    pub fn display_transform(self) -> GeometricOp {
+        match self {
+            Self::Standard => GeometricOp::Identity,
+            Self::FlipX => GeometricOp::FlipHorizontal,
+            Self::Rotate180 => GeometricOp::Rotate180,
+            Self::FlipY => GeometricOp::FlipVertical,
+            Self::Rotate90Cw => GeometricOp::Rotate90Cw,
+            Self::Rotate90CwFlipY => GeometricOp::Transpose,
+            Self::Rotate90Ccw => GeometricOp::Rotate90Ccw,
+            Self::Rotate90CcwFlipY => GeometricOp::AntiTranspose,
+        }
+    }
+
+    /// The named orientation whose [`Orientation::display_transform`] is
+    /// `op` — the inverse lookup of [`Orientation::display_transform`].
+    /// Total: each of the eight [`GeometricOp`] variants names exactly one
+    /// orientation.
+    pub fn from_display_transform(op: GeometricOp) -> Self {
+        match op {
+            GeometricOp::Identity => Self::Standard,
+            GeometricOp::FlipHorizontal => Self::FlipX,
+            GeometricOp::Rotate180 => Self::Rotate180,
+            GeometricOp::FlipVertical => Self::FlipY,
+            GeometricOp::Rotate90Cw => Self::Rotate90Cw,
+            GeometricOp::Transpose => Self::Rotate90CwFlipY,
+            GeometricOp::Rotate90Ccw => Self::Rotate90Ccw,
+            GeometricOp::AntiTranspose => Self::Rotate90CcwFlipY,
+        }
+    }
+}
+
+/// One of the eight rigid symmetries of a rectangle — the dihedral group
+/// `D₄`. These are exactly the geometric operations the Radiance §2
+/// resolution-string orientations describe, named as picture transforms
+/// rather than as on-disk axis flags.
+///
+/// Four of them (`Identity`, `FlipHorizontal`, `FlipVertical`,
+/// `Rotate180`) preserve the `width × height` aspect; the other four
+/// (`Rotate90Cw`, `Rotate90Ccw`, `Transpose`, `AntiTranspose`) swap the
+/// two dimensions. [`GeometricOp::swaps_dimensions`] reports which.
+///
+/// The group is closed under composition ([`GeometricOp::then`]) and every
+/// element has an inverse ([`GeometricOp::inverse`]); [`GeometricOp::ALL`]
+/// enumerates all eight. [`crate::HdrImage`] applies any of them to its
+/// float pixel buffer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum GeometricOp {
+    /// Leave the picture unchanged.
+    Identity,
+    /// Mirror left↔right (reflect across the vertical centre line).
+    FlipHorizontal,
+    /// Mirror top↔bottom (reflect across the horizontal centre line).
+    FlipVertical,
+    /// Rotate 180°.
+    Rotate180,
+    /// Rotate 90° clockwise. Swaps width and height.
+    Rotate90Cw,
+    /// Rotate 90° counter-clockwise. Swaps width and height.
+    Rotate90Ccw,
+    /// Reflect across the main diagonal (`(x, y) -> (y, x)`). Swaps width
+    /// and height. Equivalent to a 90° CW rotation followed by a vertical
+    /// flip.
+    Transpose,
+    /// Reflect across the anti-diagonal. Swaps width and height.
+    /// Equivalent to a 90° CCW rotation followed by a vertical flip (or a
+    /// transpose followed by a 180° rotation).
+    AntiTranspose,
+}
+
+impl GeometricOp {
+    /// All eight symmetries, in a stable order.
+    pub const ALL: [GeometricOp; 8] = [
+        GeometricOp::Identity,
+        GeometricOp::FlipHorizontal,
+        GeometricOp::FlipVertical,
+        GeometricOp::Rotate180,
+        GeometricOp::Rotate90Cw,
+        GeometricOp::Rotate90Ccw,
+        GeometricOp::Transpose,
+        GeometricOp::AntiTranspose,
+    ];
+
+    /// `true` when applying this op swaps the picture's width and height
+    /// (the four 90°-class operations). The aspect-preserving four return
+    /// `false`.
+    pub fn swaps_dimensions(self) -> bool {
+        matches!(
+            self,
+            Self::Rotate90Cw | Self::Rotate90Ccw | Self::Transpose | Self::AntiTranspose
+        )
+    }
+
+    /// The inverse symmetry: `op.then(op.inverse()) == Identity` for every
+    /// op. Six of the eight are involutions (their own inverse); the two
+    /// 90° rotations invert to each other.
+    pub fn inverse(self) -> Self {
+        match self {
+            Self::Rotate90Cw => Self::Rotate90Ccw,
+            Self::Rotate90Ccw => Self::Rotate90Cw,
+            // Identity, the two flips, the 180° rotation, and both
+            // diagonal reflections are their own inverse.
+            other => other,
+        }
+    }
+
+    /// Compose two symmetries: `a.then(b)` is the single op equal to
+    /// applying `a` first, then `b`. Closed over the group — the result is
+    /// always one of the eight variants. This is the group multiplication
+    /// that lets [`crate::HdrImage::reorient`] collapse a "back to
+    /// standard, then out to the target" pair into a single transform.
+    pub fn then(self, next: Self) -> Self {
+        // Represent each element of D₄ as a (rotation k·90° CCW, mirror?)
+        // pair and multiply in that normal form, then read the product
+        // back out. `r` counts 90° CCW steps (0..4); `m` is a post-rotation
+        // horizontal mirror flag.
+        let (r0, m0) = self.to_rot_mirror();
+        let (r1, m1) = next.to_rot_mirror();
+        // Composition in the semidirect-product normal form
+        // (apply self, then next): rotations add, but a mirror in `self`
+        // negates the rotation contributed afterwards by `next`.
+        let r = if m0 { (r0 + 4 - r1) % 4 } else { (r0 + r1) % 4 };
+        let m = m0 ^ m1;
+        Self::from_rot_mirror(r, m)
+    }
+
+    // Normal form: number of 90°-CCW rotations (0..4) and whether a
+    // horizontal mirror is applied *after* the rotation.
+    fn to_rot_mirror(self) -> (u8, bool) {
+        match self {
+            Self::Identity => (0, false),
+            Self::Rotate90Ccw => (1, false),
+            Self::Rotate180 => (2, false),
+            Self::Rotate90Cw => (3, false),
+            Self::FlipHorizontal => (0, true),
+            Self::AntiTranspose => (1, true),
+            Self::FlipVertical => (2, true),
+            Self::Transpose => (3, true),
+        }
+    }
+
+    fn from_rot_mirror(r: u8, m: bool) -> Self {
+        match (r % 4, m) {
+            (0, false) => Self::Identity,
+            (1, false) => Self::Rotate90Ccw,
+            (2, false) => Self::Rotate180,
+            (3, false) => Self::Rotate90Cw,
+            (0, true) => Self::FlipHorizontal,
+            (1, true) => Self::AntiTranspose,
+            (2, true) => Self::FlipVertical,
+            (3, true) => Self::Transpose,
+            _ => unreachable!("r is reduced mod 4"),
+        }
+    }
 }
 
 /// CIE chromaticity coordinates carried in a `PRIMARIES=` record.
@@ -635,5 +804,156 @@ mod tests {
         assert!((back.green.0 - p.green.0).abs() < 1e-5);
         assert!((back.blue.0 - p.blue.0).abs() < 1e-5);
         assert!((back.white.0 - p.white.0).abs() < 1e-5);
+    }
+
+    // -- GeometricOp group algebra (the §2 orientation matrix as D₄) --
+
+    /// An independent coordinate-level model of a [`GeometricOp`]: where a
+    /// source pixel `(x, y)` of a `w × h` picture lands, and the output
+    /// dimensions. This is the geometric ground truth the abstract
+    /// `then` / `inverse` group ops are validated against — it never calls
+    /// the normal-form arithmetic under test.
+    fn model(op: GeometricOp, x: i64, y: i64, w: i64, h: i64) -> (i64, i64, i64, i64) {
+        // Returns (dst_x, dst_y, out_w, out_h).
+        match op {
+            GeometricOp::Identity => (x, y, w, h),
+            GeometricOp::FlipHorizontal => (w - 1 - x, y, w, h),
+            GeometricOp::FlipVertical => (x, h - 1 - y, w, h),
+            GeometricOp::Rotate180 => (w - 1 - x, h - 1 - y, w, h),
+            GeometricOp::Rotate90Cw => (h - 1 - y, x, h, w),
+            GeometricOp::Rotate90Ccw => (y, w - 1 - x, h, w),
+            GeometricOp::Transpose => (y, x, h, w),
+            GeometricOp::AntiTranspose => (h - 1 - y, w - 1 - x, h, w),
+        }
+    }
+
+    #[test]
+    fn geometric_op_all_lists_eight_distinct_variants() {
+        use std::collections::HashSet;
+        let set: HashSet<_> = GeometricOp::ALL.iter().copied().collect();
+        assert_eq!(set.len(), 8, "ALL must enumerate eight distinct ops");
+    }
+
+    #[test]
+    fn geometric_op_swaps_dimensions_matches_model() {
+        // The (3,7) asymmetric source makes a dimension swap observable.
+        for op in GeometricOp::ALL {
+            let (_, _, ow, oh) = model(op, 0, 0, 3, 7);
+            assert_eq!(
+                op.swaps_dimensions(),
+                (ow, oh) == (7, 3),
+                "{op:?}: swaps_dimensions disagrees with the coordinate model",
+            );
+        }
+    }
+
+    #[test]
+    fn geometric_op_inverse_undoes_every_op() {
+        // For each op, mapping a pixel forward then through the inverse must
+        // land back on the original coordinate for every pixel of a 3×7 grid.
+        let (w, h) = (3i64, 7i64);
+        for op in GeometricOp::ALL {
+            let inv = op.inverse();
+            for y in 0..h {
+                for x in 0..w {
+                    let (mx, my, mw, mh) = model(op, x, y, w, h);
+                    let (bx, by, bw, bh) = model(inv, mx, my, mw, mh);
+                    assert_eq!(
+                        (bx, by, bw, bh),
+                        (x, y, w, h),
+                        "{op:?}.inverse() failed to restore ({x},{y})",
+                    );
+                }
+            }
+            // Algebraic statement of the same fact.
+            assert_eq!(op.then(inv), GeometricOp::Identity, "{op:?}.then(inverse)");
+        }
+    }
+
+    #[test]
+    fn geometric_op_then_matches_sequential_application() {
+        // `a.then(b)` must equal "apply a, then b" as a coordinate map, for
+        // every ordered pair across a 3×7 grid. This pins the normal-form
+        // group multiplication against the independent geometric model.
+        let (w, h) = (3i64, 7i64);
+        for a in GeometricOp::ALL {
+            for b in GeometricOp::ALL {
+                let composed = a.then(b);
+                for y in 0..h {
+                    for x in 0..w {
+                        let (ax, ay, aw, ah) = model(a, x, y, w, h);
+                        let (bx, by, bw, bh) = model(b, ax, ay, aw, ah);
+                        let (cx, cy, cw, ch) = model(composed, x, y, w, h);
+                        assert_eq!(
+                            (bx, by, bw, bh),
+                            (cx, cy, cw, ch),
+                            "{a:?}.then({b:?}) != sequential at ({x},{y})",
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn geometric_op_then_is_closed_and_associative() {
+        // Closure: every product is one of the eight. Associativity:
+        // (a·b)·c == a·(b·c) for all triples — the group axioms.
+        for a in GeometricOp::ALL {
+            for b in GeometricOp::ALL {
+                assert!(GeometricOp::ALL.contains(&a.then(b)), "{a:?}·{b:?} escaped");
+                for c in GeometricOp::ALL {
+                    assert_eq!(
+                        a.then(b).then(c),
+                        a.then(b.then(c)),
+                        "associativity failed for {a:?},{b:?},{c:?}",
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn orientation_display_transform_round_trips() {
+        // display_transform / from_display_transform are mutual inverses
+        // over all eight orientations, and the mapping is a bijection onto
+        // the eight GeometricOp variants.
+        use std::collections::HashSet;
+        let orientations = [
+            Orientation::Standard,
+            Orientation::FlipX,
+            Orientation::Rotate180,
+            Orientation::FlipY,
+            Orientation::Rotate90Cw,
+            Orientation::Rotate90CwFlipY,
+            Orientation::Rotate90Ccw,
+            Orientation::Rotate90CcwFlipY,
+        ];
+        let mut ops = HashSet::new();
+        for o in orientations {
+            let op = o.display_transform();
+            ops.insert(op);
+            assert_eq!(
+                Orientation::from_display_transform(op),
+                o,
+                "{o:?} did not round-trip through its display transform",
+            );
+        }
+        assert_eq!(ops.len(), 8, "display_transform is not a bijection");
+    }
+
+    #[test]
+    fn orientation_x_first_iff_display_transform_swaps_dimensions() {
+        // The four X-first orientations are exactly the four dimension-
+        // swapping (90°-class) display transforms — a cross-check tying the
+        // axis-field view to the geometric view.
+        for op in GeometricOp::ALL {
+            let o = Orientation::from_display_transform(op);
+            assert_eq!(
+                o.is_x_first(),
+                op.swaps_dimensions(),
+                "{o:?} / {op:?}: x_first vs dimension-swap mismatch",
+            );
+        }
     }
 }

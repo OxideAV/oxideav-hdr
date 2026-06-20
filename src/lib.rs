@@ -57,7 +57,7 @@ pub use encoder::{
     encode_hdr_with_options, encode_hdr_with_rle, LineEnding, MagicLine, RleMode,
 };
 pub use error::{HdrError, Result};
-pub use header::{AxisSign, HdrFormat, HdrHeader, Orientation, Primaries};
+pub use header::{AxisSign, GeometricOp, HdrFormat, HdrHeader, Orientation, Primaries};
 pub use image::{HdrImage, HdrPixelFormat};
 pub use limits::HdrLimits;
 pub use rgbe::{

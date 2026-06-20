@@ -10,7 +10,121 @@
 //! float dynamic range stays available to native callers and the LDR
 //! framework path stays simple.
 
-use crate::header::{HdrHeader, Primaries};
+use crate::header::{GeometricOp, HdrHeader, Orientation, Primaries};
+
+// ---------------------------------------------------------------------------
+// Geometric reorientation primitives (the §2 resolution-string orientation
+// matrix, applied to the *displayed* float buffer)
+// ---------------------------------------------------------------------------
+//
+// A decoded `HdrImage` always carries its `pixels` buffer in canonical
+// standard display order — top-down, left-to-right, the picture seen
+// right-side-up (`docs/image/hdr/radiance-hdr-rgbe-format.md` §2: the
+// `-Y N +X M` standard form "scanlines run from the upper-left across to
+// upper-right, then down the picture"). The on-disk axis flags only choose
+// the file byte order; the decoder normalises every flavour to this one
+// display layout, and the encoder reorients back out.
+//
+// These helpers transform the *picture content* itself — rotate the image
+// 90°, mirror it, etc. — so callers holding a decoded buffer can apply or
+// undo the eight geometric symmetries the format note's §2 table enumerates.
+// Each operates on packed RGB f32 triples (3 components per pixel) and is a
+// pure pixel permutation: no value is altered, only its (x, y) position.
+
+/// Mirror the picture left↔right (reflect across the vertical centre line).
+/// Dimensions are unchanged. Pixel `(x, y)` moves to `(w-1-x, y)`.
+fn buf_flip_horizontal(pixels: &[f32], width: usize, height: usize) -> Vec<f32> {
+    let mut out = vec![0.0f32; pixels.len()];
+    for y in 0..height {
+        for x in 0..width {
+            let src = (y * width + x) * 3;
+            let dst = (y * width + (width - 1 - x)) * 3;
+            out[dst..dst + 3].copy_from_slice(&pixels[src..src + 3]);
+        }
+    }
+    out
+}
+
+/// Mirror the picture top↔bottom (reflect across the horizontal centre
+/// line). Dimensions are unchanged. Pixel `(x, y)` moves to `(x, h-1-y)`.
+fn buf_flip_vertical(pixels: &[f32], width: usize, height: usize) -> Vec<f32> {
+    let row = width * 3;
+    let mut out = vec![0.0f32; pixels.len()];
+    for y in 0..height {
+        let src = y * row;
+        let dst = (height - 1 - y) * row;
+        out[dst..dst + row].copy_from_slice(&pixels[src..src + row]);
+    }
+    out
+}
+
+/// Rotate the picture 180°. Dimensions are unchanged. Pixel `(x, y)` moves
+/// to `(w-1-x, h-1-y)` — the composition of a horizontal and a vertical
+/// flip, done in one pass.
+fn buf_rotate_180(pixels: &[f32], width: usize, height: usize) -> Vec<f32> {
+    let n = width * height;
+    let mut out = vec![0.0f32; pixels.len()];
+    for i in 0..n {
+        let src = i * 3;
+        let dst = (n - 1 - i) * 3;
+        out[dst..dst + 3].copy_from_slice(&pixels[src..src + 3]);
+    }
+    out
+}
+
+/// Transpose across the main diagonal (`(x, y) -> (y, x)`). The output
+/// dimensions are swapped: a `w × h` picture becomes `h × w`. This is the
+/// reflection that turns the four 90°-rotation orientations into the four
+/// axis-aligned ones.
+fn buf_transpose(pixels: &[f32], width: usize, height: usize) -> Vec<f32> {
+    let mut out = vec![0.0f32; pixels.len()];
+    // Source `(x, y)` at `(y*width + x)*3`; dest (dims now height×width)
+    // `(y, x)` at `(x*height + y)*3`.
+    for y in 0..height {
+        for x in 0..width {
+            let src = (y * width + x) * 3;
+            let dst = (x * height + y) * 3;
+            out[dst..dst + 3].copy_from_slice(&pixels[src..src + 3]);
+        }
+    }
+    out
+}
+
+/// Rotate the picture 90° clockwise. Output dimensions are swapped
+/// (`w × h` → `h × w`). A pixel at `(x, y)` in the source lands at
+/// `(h-1-y, x)` in the rotated picture.
+fn buf_rotate_90_cw(pixels: &[f32], width: usize, height: usize) -> Vec<f32> {
+    // Output is `out_w = height` wide, `out_h = width` tall.
+    let out_w = height;
+    let mut out = vec![0.0f32; pixels.len()];
+    for y in 0..height {
+        for x in 0..width {
+            let src = (y * width + x) * 3;
+            let (ox, oy) = (height - 1 - y, x);
+            let dst = (oy * out_w + ox) * 3;
+            out[dst..dst + 3].copy_from_slice(&pixels[src..src + 3]);
+        }
+    }
+    out
+}
+
+/// Rotate the picture 90° counter-clockwise. Output dimensions are swapped
+/// (`w × h` → `h × w`). A pixel at `(x, y)` in the source lands at
+/// `(y, w-1-x)` in the rotated picture.
+fn buf_rotate_90_ccw(pixels: &[f32], width: usize, height: usize) -> Vec<f32> {
+    // Output is `out_w = height` wide, `out_h = width` tall.
+    let out_w = height;
+    let mut out = vec![0.0f32; pixels.len()];
+    for y in 0..height {
+        for x in 0..width {
+            let src = (y * width + x) * 3;
+            let (ox, oy) = (y, width - 1 - x);
+            let dst = (oy * out_w + ox) * 3;
+            out[dst..dst + 3].copy_from_slice(&pixels[src..src + 3]);
+        }
+    }
+    out
+}
 
 #[cfg(test)]
 mod tests {
@@ -707,6 +821,210 @@ mod tests {
         assert!((back.white.0 - p.white.0).abs() < 1e-5);
         assert!((back.white.1 - p.white.1).abs() < 1e-5);
     }
+
+    // -- Geometric reorientation of the displayed buffer (§2 matrix) --
+
+    /// Build a `w × h` picture whose every pixel carries its own `(x, y)`
+    /// in the R and G channels (B held at a constant marker). This makes a
+    /// geometric permutation directly auditable: after a transform the
+    /// pixel at output `(ox, oy)` must carry the source `(x, y)` the
+    /// coordinate model predicts.
+    fn coord_image(w: u32, h: u32) -> HdrImage {
+        let mut pixels = Vec::with_capacity((w * h * 3) as usize);
+        for y in 0..h {
+            for x in 0..w {
+                pixels.push(x as f32);
+                pixels.push(y as f32);
+                pixels.push(0.5);
+            }
+        }
+        HdrImage::new_rgb96f(w, h, pixels)
+    }
+
+    /// Coordinate ground-truth model, mirrored from the header-module test
+    /// (kept independent of the buffer permutation under test).
+    fn model_dst(op: GeometricOp, x: i64, y: i64, w: i64, h: i64) -> (i64, i64, i64, i64) {
+        match op {
+            GeometricOp::Identity => (x, y, w, h),
+            GeometricOp::FlipHorizontal => (w - 1 - x, y, w, h),
+            GeometricOp::FlipVertical => (x, h - 1 - y, w, h),
+            GeometricOp::Rotate180 => (w - 1 - x, h - 1 - y, w, h),
+            GeometricOp::Rotate90Cw => (h - 1 - y, x, h, w),
+            GeometricOp::Rotate90Ccw => (y, w - 1 - x, h, w),
+            GeometricOp::Transpose => (y, x, h, w),
+            GeometricOp::AntiTranspose => (h - 1 - y, w - 1 - x, h, w),
+        }
+    }
+
+    fn pixel_at(img: &HdrImage, x: u32, y: u32) -> [f32; 3] {
+        let off = ((y * img.width + x) * 3) as usize;
+        [img.pixels[off], img.pixels[off + 1], img.pixels[off + 2]]
+    }
+
+    #[test]
+    fn apply_geometric_matches_coordinate_model_for_every_op() {
+        // A non-square, content-asymmetric picture so a stray transpose,
+        // mirror, or dimension swap is observable.
+        let (w, h) = (3u32, 5u32);
+        for op in GeometricOp::ALL {
+            let mut img = coord_image(w, h);
+            img.apply_geometric(op);
+            // Dimensions follow the model.
+            let (_, _, mw, mh) = model_dst(op, 0, 0, w as i64, h as i64);
+            assert_eq!(
+                (img.width as i64, img.height as i64),
+                (mw, mh),
+                "{op:?}: output dimensions",
+            );
+            // Every source pixel landed where the model says.
+            for y in 0..h {
+                for x in 0..w {
+                    let (dx, dy, _, _) = model_dst(op, x as i64, y as i64, w as i64, h as i64);
+                    let got = pixel_at(&img, dx as u32, dy as u32);
+                    assert_eq!(
+                        [got[0] as u32, got[1] as u32],
+                        [x, y],
+                        "{op:?}: source ({x},{y}) expected at ({dx},{dy})",
+                    );
+                    assert_eq!(got[2], 0.5, "{op:?}: B marker disturbed");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn apply_geometric_inverse_restores_buffer_bit_for_bit() {
+        let original = coord_image(4, 7);
+        for op in GeometricOp::ALL {
+            let mut img = original.clone();
+            img.apply_geometric(op);
+            img.apply_geometric(op.inverse());
+            assert_eq!(img.width, original.width, "{op:?}: width restored");
+            assert_eq!(img.height, original.height, "{op:?}: height restored");
+            assert_eq!(img.pixels, original.pixels, "{op:?}: pixels restored");
+        }
+    }
+
+    #[test]
+    fn apply_geometric_composition_equals_single_then_op() {
+        // Applying `a` then `b` must equal applying `a.then(b)` once — the
+        // group law realised on the actual pixel buffer.
+        let original = coord_image(3, 5);
+        for a in GeometricOp::ALL {
+            for b in GeometricOp::ALL {
+                let mut seq = original.clone();
+                seq.apply_geometric(a);
+                seq.apply_geometric(b);
+
+                let mut one = original.clone();
+                one.apply_geometric(a.then(b));
+
+                assert_eq!(
+                    (seq.width, seq.height),
+                    (one.width, one.height),
+                    "{a:?}.then({b:?}): dims",
+                );
+                assert_eq!(seq.pixels, one.pixels, "{a:?}.then({b:?}): pixels");
+            }
+        }
+    }
+
+    #[test]
+    fn to_orientation_then_normalize_from_is_identity() {
+        let original = coord_image(5, 3);
+        for o in [
+            Orientation::Standard,
+            Orientation::FlipX,
+            Orientation::Rotate180,
+            Orientation::FlipY,
+            Orientation::Rotate90Cw,
+            Orientation::Rotate90CwFlipY,
+            Orientation::Rotate90Ccw,
+            Orientation::Rotate90CcwFlipY,
+        ] {
+            let mut img = original.clone();
+            img.to_orientation(o);
+            img.normalize_from(o);
+            assert_eq!(img.width, original.width, "{o:?}");
+            assert_eq!(img.height, original.height, "{o:?}");
+            assert_eq!(img.pixels, original.pixels, "{o:?}: round-trip");
+        }
+    }
+
+    #[test]
+    fn reorient_equals_normalize_then_to_orientation() {
+        // reorient(from, to) must equal: normalize_from(from) then
+        // to_orientation(to) — done across the full 8×8 orientation matrix.
+        let all = [
+            Orientation::Standard,
+            Orientation::FlipX,
+            Orientation::Rotate180,
+            Orientation::FlipY,
+            Orientation::Rotate90Cw,
+            Orientation::Rotate90CwFlipY,
+            Orientation::Rotate90Ccw,
+            Orientation::Rotate90CcwFlipY,
+        ];
+        let original = coord_image(4, 6);
+        for from in all {
+            for to in all {
+                let mut a = original.clone();
+                a.reorient(from, to);
+
+                let mut b = original.clone();
+                b.normalize_from(from);
+                b.to_orientation(to);
+
+                assert_eq!((a.width, a.height), (b.width, b.height), "{from:?}->{to:?}");
+                assert_eq!(a.pixels, b.pixels, "{from:?}->{to:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn reorient_same_orientation_is_identity() {
+        let all = [
+            Orientation::Standard,
+            Orientation::FlipX,
+            Orientation::Rotate180,
+            Orientation::FlipY,
+            Orientation::Rotate90Cw,
+            Orientation::Rotate90CwFlipY,
+            Orientation::Rotate90Ccw,
+            Orientation::Rotate90CcwFlipY,
+        ];
+        let original = coord_image(3, 7);
+        for o in all {
+            let mut img = original.clone();
+            img.reorient(o, o);
+            assert_eq!(img.pixels, original.pixels, "{o:?}: reorient(o,o)");
+            assert_eq!((img.width, img.height), (original.width, original.height));
+        }
+    }
+
+    #[test]
+    fn apply_geometric_on_zero_dimension_swaps_extents_only() {
+        // A degenerate 0×4 picture: a dimension-swapping op must still
+        // report swapped extents, and nothing panics.
+        let mut img = HdrImage::new_rgb96f(0, 4, Vec::new());
+        img.apply_geometric(GeometricOp::Rotate90Cw);
+        assert_eq!((img.width, img.height), (4, 0));
+        assert!(img.pixels.is_empty());
+        // Aspect-preserving op leaves the (still empty) shape alone.
+        img.apply_geometric(GeometricOp::FlipVertical);
+        assert_eq!((img.width, img.height), (4, 0));
+    }
+
+    #[test]
+    fn rotate_90_cw_is_visually_a_quarter_turn() {
+        // Concrete 2×1 sanity check independent of the model helper: a row
+        // [A, B] rotated 90° CW becomes a column with A on top, B below.
+        let mut img = HdrImage::new_rgb96f(2, 1, vec![1.0, 0.0, 0.0, 2.0, 0.0, 0.0]);
+        img.apply_geometric(GeometricOp::Rotate90Cw);
+        assert_eq!((img.width, img.height), (1, 2));
+        assert_eq!(pixel_at(&img, 0, 0)[0], 1.0, "A on top");
+        assert_eq!(pixel_at(&img, 0, 1)[0], 2.0, "B below");
+    }
 }
 
 /// Pixel layout used by [`HdrImage`].
@@ -1254,5 +1572,94 @@ impl HdrImage {
             ));
         }
         out
+    }
+
+    /// Apply one of the eight rigid picture symmetries
+    /// ([`GeometricOp`], the §2 resolution-string orientation matrix of
+    /// `docs/image/hdr/radiance-hdr-rgbe-format.md`) to the decoded float
+    /// buffer **in place**, rewriting the picture content rather than the
+    /// on-disk axis flags.
+    ///
+    /// The decoded buffer is always in canonical standard display order
+    /// (top-down, left-to-right). This rotates / mirrors the actual image:
+    /// e.g. [`GeometricOp::Rotate90Cw`] turns a `w × h` picture into the
+    /// `h × w` picture you would see after turning it a quarter-turn
+    /// clockwise. The four 90°-class ops swap [`Self::width`] and
+    /// [`Self::height`] (see [`GeometricOp::swaps_dimensions`]); the header
+    /// metadata and `pixel_format` are left untouched, so the result
+    /// re-encodes with whatever orientation flags the header carries.
+    ///
+    /// Every operation is a pure pixel permutation — no radiance value is
+    /// altered, so this is lossless and composes exactly: applying `op`
+    /// then `op.inverse()` restores the original buffer bit-for-bit, and
+    /// `a` then `b` equals the single op `a.then(b)`.
+    pub fn apply_geometric(&mut self, op: GeometricOp) {
+        let w = self.width as usize;
+        let h = self.height as usize;
+        if w == 0 || h == 0 {
+            // Degenerate picture: nothing to permute, but a dimension-
+            // swapping op must still swap the (zero) extents so callers
+            // see a consistent shape.
+            if op.swaps_dimensions() {
+                core::mem::swap(&mut self.width, &mut self.height);
+            }
+            return;
+        }
+        let (new_pixels, swap) = match op {
+            GeometricOp::Identity => return,
+            GeometricOp::FlipHorizontal => (buf_flip_horizontal(&self.pixels, w, h), false),
+            GeometricOp::FlipVertical => (buf_flip_vertical(&self.pixels, w, h), false),
+            GeometricOp::Rotate180 => (buf_rotate_180(&self.pixels, w, h), false),
+            GeometricOp::Rotate90Cw => (buf_rotate_90_cw(&self.pixels, w, h), true),
+            GeometricOp::Rotate90Ccw => (buf_rotate_90_ccw(&self.pixels, w, h), true),
+            GeometricOp::Transpose => (buf_transpose(&self.pixels, w, h), true),
+            // Anti-diagonal reflection = transpose, then 180° rotation of
+            // the (now h×w) result. Both passes are pure permutations.
+            GeometricOp::AntiTranspose => {
+                let t = buf_transpose(&self.pixels, w, h);
+                (buf_rotate_180(&t, h, w), true)
+            }
+        };
+        self.pixels = new_pixels;
+        if swap {
+            core::mem::swap(&mut self.width, &mut self.height);
+        }
+    }
+
+    /// Reinterpret the decoded standard-display buffer as the picture
+    /// described by `target` and rewrite the pixels to match — i.e. apply
+    /// `target.display_transform()`.
+    ///
+    /// Use this to *render* a decoded picture the way a given orientation
+    /// would display it. The inverse is [`Self::normalize_from`].
+    pub fn to_orientation(&mut self, target: Orientation) {
+        self.apply_geometric(target.display_transform());
+    }
+
+    /// Undo `source`'s display transform, mapping a buffer that is laid out
+    /// as `source` describes back to canonical standard display order —
+    /// i.e. apply `source.display_transform().inverse()`.
+    ///
+    /// This is the exact inverse of [`Self::to_orientation`]:
+    /// `img.to_orientation(o); img.normalize_from(o)` restores `img`.
+    pub fn normalize_from(&mut self, source: Orientation) {
+        self.apply_geometric(source.display_transform().inverse());
+    }
+
+    /// Move the picture content from the `from` orientation to the `to`
+    /// orientation in a single pass: undo `from`'s display transform (back
+    /// to standard), then apply `to`'s. Because the eight transforms form
+    /// the dihedral group `D₄`, the round trip collapses to one
+    /// [`GeometricOp`] — `from.display_transform().inverse().then(
+    /// to.display_transform())` — applied once, so no intermediate buffer
+    /// is built.
+    ///
+    /// `reorient(o, o)` is the identity for every `o`.
+    pub fn reorient(&mut self, from: Orientation, to: Orientation) {
+        let op = from
+            .display_transform()
+            .inverse()
+            .then(to.display_transform());
+        self.apply_geometric(op);
     }
 }
