@@ -810,6 +810,87 @@ mod tests {
     }
 
     #[test]
+    fn recover_scene_referred_radiance_divides_both_and_clears_slots() {
+        // stored = radiance(1,1,1) * EXPOSURE(3) * COLORCORR(2,4,5).
+        let pixels = vec![6.0, 12.0, 15.0];
+        let mut img = HdrImage::new_rgb96f(1, 1, pixels);
+        img.header.exposure = Some(3.0);
+        img.header.colorcorr = Some([2.0, 4.0, 5.0]);
+        img.recover_scene_referred_radiance();
+        for c in &img.pixels {
+            assert!((c - 1.0).abs() < 1e-6, "{c}");
+        }
+        assert!(img.header.exposure.is_none(), "exposure slot not cleared");
+        assert!(img.header.colorcorr.is_none(), "colorcorr slot not cleared");
+    }
+
+    #[test]
+    fn recover_scene_referred_radiance_matches_buffer_view() {
+        // The in-place mutator leaves the buffer holding the same values
+        // the non-mutating `scene_referred_radiance_buffer` returns.
+        let pixels = vec![6.0, 12.0, 15.0, 1.0, 2.0, 4.0];
+        let mut img = HdrImage::new_rgb96f(2, 1, pixels);
+        img.header.exposure = Some(3.0);
+        img.header.colorcorr = Some([2.0, 4.0, 5.0]);
+        let expect = img.scene_referred_radiance_buffer();
+        img.recover_scene_referred_radiance();
+        assert_eq!(img.pixels.len(), expect.len());
+        for (a, b) in img.pixels.iter().zip(expect.iter()) {
+            assert!((a - b).abs() < 1e-6, "{a} vs {b}");
+        }
+    }
+
+    #[test]
+    fn recover_scene_referred_radiance_with_no_records_is_a_noop() {
+        let pixels = vec![1.0, 0.5, 0.25];
+        let mut img = HdrImage::new_rgb96f(1, 1, pixels.clone());
+        img.recover_scene_referred_radiance();
+        for (a, b) in pixels.iter().zip(img.pixels.iter()) {
+            assert!((a - b).abs() < 1e-6, "{a} vs {b}");
+        }
+    }
+
+    #[test]
+    fn recover_scene_referred_radiance_degenerate_factor_clears_without_poisoning() {
+        // A zero exposure / NaN colorcorr component is a no-op division
+        // but still clears the slot — the buffer must stay finite.
+        let pixels = vec![1.0, 1.0, 1.0];
+        let mut img = HdrImage::new_rgb96f(1, 1, pixels);
+        img.header.exposure = Some(0.0);
+        img.header.colorcorr = Some([f32::NAN, 1.0, 1.0]);
+        img.recover_scene_referred_radiance();
+        for c in &img.pixels {
+            assert!(c.is_finite() && (c - 1.0).abs() < 1e-6, "{c}");
+        }
+        assert!(img.header.exposure.is_none());
+        assert!(img.header.colorcorr.is_none());
+        // Idempotent: a second call does nothing.
+        img.recover_scene_referred_radiance();
+        for c in &img.pixels {
+            assert!((c - 1.0).abs() < 1e-6, "{c}");
+        }
+    }
+
+    #[test]
+    fn recover_scene_referred_radiance_inverts_apply_chain() {
+        // apply_exposure + apply_colorcorr fold the factors in;
+        // recover_scene_referred_radiance is their composed inverse.
+        let original = vec![0.6_f32, 0.4, 0.2];
+        let mut img = HdrImage::new_rgb96f(1, 1, original.clone());
+        img.header.exposure = Some(3.0);
+        img.header.colorcorr = Some([2.0, 4.0, 8.0]);
+        img.apply_exposure();
+        img.apply_colorcorr();
+        // Restore the slots so the recover step has factors to undo.
+        img.header.exposure = Some(3.0);
+        img.header.colorcorr = Some([2.0, 4.0, 8.0]);
+        img.recover_scene_referred_radiance();
+        for (a, b) in original.iter().zip(img.pixels.iter()) {
+            assert!((a - b).abs() < 1e-6, "{a} vs {b}");
+        }
+    }
+
+    #[test]
     fn effective_exposure_defaults_to_one_when_absent() {
         // Spec: "No EXPOSURE ⇒ none applied." Helper returns 1.0 (the
         // identity multiplier) when the slot is None.
@@ -1569,6 +1650,36 @@ impl HdrImage {
                 }
             }
         }
+    }
+
+    /// Reconstruct the picture's scene-referred radiance **in place** by
+    /// dividing out *both* the cumulative `EXPOSURE=` multiplier and the
+    /// `COLORCORR=` triple the writer baked into the stored channels, and
+    /// clear both header slots.
+    ///
+    /// This is the one-shot composition of
+    /// [`Self::recover_original_radiance`] and
+    /// [`Self::recover_original_colorcorr`] — the full §1 recovery the
+    /// staged spec (`docs/image/hdr/radiance-hdr-rgbe-format.md`)
+    /// describes ("to recover original radiances (watts/sr/m²) divide
+    /// file values by the product of all EXPOSURE settings", with the
+    /// complementary per-primary `COLORCORR` division). After this call
+    /// the buffer holds scene-referred radiance and the typed
+    /// [`HdrHeader::exposure`] / [`HdrHeader::colorcorr`] slots are
+    /// cleared, so a subsequent re-encode does not re-bake the factors.
+    ///
+    /// It is the mutating counterpart to the non-mutating
+    /// [`Self::scene_referred_radiance_buffer`]: the two leave the buffer
+    /// holding the same recovered values (the radiance buffer just returns
+    /// a fresh copy and preserves the slots). The two component mutators'
+    /// edge-case handling carries over verbatim — a `None` slot, the
+    /// trivial `1.0` exposure / `[1, 1, 1]` triple, and any `0.0` or
+    /// non-finite factor are no-op divisions (the slot is still cleared),
+    /// so a malformed header can never write NaN / ∞ into the buffer. A
+    /// second call is a no-op (both slots are `None` after the first).
+    pub fn recover_scene_referred_radiance(&mut self) {
+        self.recover_original_radiance();
+        self.recover_original_colorcorr();
     }
 
     /// Allocate a fresh `width * height` buffer of per-pixel *physical*
