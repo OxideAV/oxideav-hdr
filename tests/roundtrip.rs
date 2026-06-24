@@ -371,3 +371,82 @@ fn rle_mode_auto_uses_new_for_normal_widths() {
     let payload_start = res_end + 1;
     assert_eq!(&bytes[payload_start..payload_start + 2], &[0x02, 0x02]);
 }
+
+#[test]
+fn scene_referred_recovery_survives_encode_decode_via_public_api() {
+    // Build a picture whose stored channels are a known scene-referred
+    // radiance scaled by EXPOSURE and COLORCORR the writer "baked in",
+    // encode it, decode it, and confirm both the non-mutating
+    // `scene_referred_radiance_buffer` and the in-place
+    // `recover_scene_referred_radiance` recover the original radiance
+    // end-to-end through the public API — the round-trip the round-366
+    // recovery subsystem promises.
+    let w = 16_u32;
+    let h = 8_u32;
+    // Pick a constant scene radiance so the shared-exponent quantiser is
+    // exact (power-of-two-ish magnitudes recover to high precision).
+    let radiance = [0.5_f32, 0.25, 0.125];
+    let exposure = 4.0_f32;
+    let colorcorr = [2.0_f32, 1.0, 0.5];
+    let mut pixels = Vec::with_capacity((w * h * 3) as usize);
+    for _ in 0..(w * h) {
+        pixels.push(radiance[0] * exposure * colorcorr[0]);
+        pixels.push(radiance[1] * exposure * colorcorr[1]);
+        pixels.push(radiance[2] * exposure * colorcorr[2]);
+    }
+    let mut src = HdrImage::new_rgb96f(w, h, pixels);
+    src.header.exposure = Some(exposure);
+    src.header.colorcorr = Some(colorcorr);
+
+    let bytes = encode_hdr(&src).unwrap();
+    let back = parse_hdr(&bytes).unwrap();
+    // The decoder folds the records into the typed slots.
+    assert_eq!(back.header.exposure, Some(exposure));
+    assert_eq!(back.header.colorcorr, Some(colorcorr));
+
+    // Non-mutating recovery: slots survive, buffer holds radiance.
+    let recovered = back.scene_referred_radiance_buffer();
+    for px in recovered.chunks_exact(3) {
+        assert!(
+            (px[0] - radiance[0]).abs() < 1e-2,
+            "{} vs {}",
+            px[0],
+            radiance[0]
+        );
+        assert!(
+            (px[1] - radiance[1]).abs() < 1e-2,
+            "{} vs {}",
+            px[1],
+            radiance[1]
+        );
+        assert!(
+            (px[2] - radiance[2]).abs() < 1e-2,
+            "{} vs {}",
+            px[2],
+            radiance[2]
+        );
+    }
+    assert_eq!(back.header.exposure, Some(exposure));
+    assert_eq!(back.header.colorcorr, Some(colorcorr));
+
+    // In-place recovery: leaves identical values and clears the slots.
+    let mut back2 = parse_hdr(&bytes).unwrap();
+    back2.recover_scene_referred_radiance();
+    for (a, b) in back2.pixels.iter().zip(recovered.iter()) {
+        assert!((a - b).abs() < 1e-6, "{a} vs {b}");
+    }
+    assert!(back2.header.exposure.is_none());
+    assert!(back2.header.colorcorr.is_none());
+    // After recovery + clear, a re-encode no longer carries the records.
+    let reencoded = encode_hdr(&back2).unwrap();
+    let blank = reencoded.windows(2).position(|w| w == b"\n\n").unwrap();
+    let header_text = &reencoded[..blank];
+    assert!(
+        !header_text.windows(9).any(|w| w == b"EXPOSURE="),
+        "EXPOSURE= should be gone after recovery"
+    );
+    assert!(
+        !header_text.windows(10).any(|w| w == b"COLORCORR="),
+        "COLORCORR= should be gone after recovery"
+    );
+}
