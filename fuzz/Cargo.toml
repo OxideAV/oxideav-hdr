@@ -24,7 +24,7 @@ cargo-fuzz = true
 #    `4 * width` byte RGBE quads with no sentinels). All three are
 #    reachable from arbitrary fuzz input.
 #
-# Five targets:
+# Six targets:
 #
 #  * `decode`     — feed arbitrary bytes to `parse_hdr` and assert the
 #                   call always *returns* (Result-vs-panic). Default
@@ -67,6 +67,19 @@ cargo-fuzz = true
 #                   launder away through the RGBE quantiser — reach the
 #                   `3×3` matrix inversion and the per-operator
 #                   transcendentals directly.
+#  * `encode`     — drive the *encoder* across the full cross-product of
+#                   its on-wire options (the four `RleMode` flavours ×
+#                   `Lf`/`Crlf` × `#?RADIANCE`/`#?RGBE` × all eight
+#                   resolution-string orientations × RGBE/XYZE `FORMAT`)
+#                   plus a fuzz-built header carrying every typed record
+#                   (`EXPOSURE` / `GAMMA` / `PIXASPECT` / `COLORCORR` /
+#                   `PRIMARIES` / `SOFTWARE` / `VIEW` + a command line),
+#                   then decode with the matching `FallbackMode` and
+#                   assert dimensions, `FORMAT`, orientation and every
+#                   typed record survive. The `roundtrip` target only
+#                   exercises the `encode_hdr` default path (RADIANCE +
+#                   default header + New-RLE + Lf); this one reaches the
+#                   header writer and the three other RLE flavours.
 #
 # The crate is pulled in with `default-features = false` so the fuzz
 # build exercises the framework-free standalone `parse_hdr` /
@@ -113,5 +126,11 @@ doc = false
 [[bin]]
 name = "colorconv"
 path = "fuzz_targets/colorconv.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "encode"
+path = "fuzz_targets/encode.rs"
 test = false
 doc = false

@@ -161,7 +161,7 @@ the canonical `-Y H +X W` axis.
 
 ## Fuzzing
 
-A `cargo-fuzz` harness under [`fuzz/`](fuzz/) ships five libFuzzer
+A `cargo-fuzz` harness under [`fuzz/`](fuzz/) ships six libFuzzer
 targets covering the public decode + encode + colour-conversion surface
 end-to-end. The
 harness uses the standalone (`default-features = false`) build so it
@@ -176,12 +176,13 @@ image-library consumers actually call.
 | `headers`    | Prepend a valid `#?RADIANCE\n` magic and a minimal `-Y 1 +X 8\n` resolution line so libFuzzer's coverage gradient focuses the corpus on the text `KEY=VALUE` parse (EXPOSURE / COLORCORR / PRIMARIES floats, comment lines, mid-line `=`). |
 | `pixels`     | Wrap a *fuzz-controlled pixel section* in a valid container envelope (magic + blank line + a fuzz-chosen `-Y H +X W` resolution line with small, bounded dimensions), then decode it under **both** `FallbackMode` branches. Forces the corpus straight into the new-RLE / old-RLE / uncompressed inner loops. |
 | `colorconv`  | Drive the **float-domain colour pipeline** — XYZE↔RGB conversion (named-space, arbitrary-`PRIMARIES`, and `_with_effective_` forms), `rgb_to_xyz_matrix_from_primaries` / `xyz_to_rgb_matrix_from_primaries` (the `3×3` inversion), `luminance_lm_per_sr_per_m2`, and all eight tone-mapping operators — on raw fuzz bytes reinterpreted **verbatim** as `f32`. The four byte-surface targets only feed this code floats laundered through the RGBE quantiser (finite, non-negative, bounded), so NaN / ±inf / negative / subnormal samples and degenerate chromaticity records reach the matrix inversion and per-operator transcendentals only here. Asserts every call returns without panicking and that buffer-length / `Rgb24` byte-count invariants hold. |
+| `encode`     | Drive the **encoder** across the full cross-product of its on-wire options — the four `RleMode` flavours × `Lf`/`Crlf` × `#?RADIANCE`/`#?RGBE` × all eight resolution-string orientations × RGBE/XYZE `FORMAT` — each carrying a fuzz-built header with every typed record (`EXPOSURE` / `GAMMA` / `PIXASPECT` / `COLORCORR` / `PRIMARIES` / `SOFTWARE` / `VIEW` + a command line). Encodes via `encode_hdr_with_full_options`, decodes with the matching `FallbackMode`, and asserts dimensions, `FORMAT`, orientation and every typed record survive. Where `roundtrip` only ever exercises the `encode_hdr` default path (RADIANCE + default header + New-RLE + `Lf`), this one reaches the header writer and the three other RLE flavours. The deterministic 256-case version of the same matrix is pinned in `tests/roundtrip.rs`. |
 
 Run any target with:
 
 ```sh
 cd fuzz
-cargo +nightly fuzz run decode      # or roundtrip / headers / pixels / colorconv
+cargo +nightly fuzz run decode      # or roundtrip / headers / pixels / colorconv / encode
 ```
 
 The harness is `cargo-fuzz` standard layout — `fuzz/Cargo.toml` declares

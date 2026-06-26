@@ -4,8 +4,9 @@
 //! catches accidental visibility regressions.
 
 use oxideav_hdr::{
-    encode_hdr, encode_hdr_with_options, encode_hdr_with_rle, parse_hdr, parse_hdr_with_options,
-    AxisSign, FallbackMode, HdrImage, HdrPixelFormat, LineEnding, RleMode,
+    encode_hdr, encode_hdr_with_full_options, encode_hdr_with_options, encode_hdr_with_rle,
+    parse_hdr, parse_hdr_with_options, AxisSign, FallbackMode, HdrFormat, HdrImage, HdrPixelFormat,
+    LineEnding, MagicLine, Orientation, Primaries, RleMode,
 };
 
 /// Same gradient construction as the in-crate unit tests, kept here to
@@ -449,4 +450,139 @@ fn scene_referred_recovery_survives_encode_decode_via_public_api() {
         !header_text.windows(10).any(|w| w == b"COLORCORR="),
         "COLORCORR= should be gone after recovery"
     );
+}
+
+/// The full on-wire option matrix the `encode` fuzz target relies on,
+/// pinned as a deterministic integration test: every [`RleMode`] flavour
+/// × both [`LineEnding`]s × both [`MagicLine`] spellings × all eight
+/// [`Orientation`]s × both [`HdrFormat`]s, each carrying a header with
+/// all seven typed records plus a command line, must survive an
+/// `encode_hdr_with_full_options` → `parse_hdr_with_options` round trip
+/// with dimensions, `FORMAT`, orientation and every typed record intact.
+///
+/// This is the ground truth the fuzz target asserts against on arbitrary
+/// input; pinning it as a unit test means a header-writer / parser
+/// asymmetry surfaces in CI even without a fuzz run.
+#[test]
+fn full_option_matrix_round_trips_typed_header_and_orientation() {
+    let exposure = 0.625_f32; // 160/256 — exactly representable
+    let gamma = 1.5_f32;
+    let pixaspect = 0.75_f32;
+    let colorcorr = [0.5_f32, 0.25_f32, 0.125_f32];
+    let primaries = Primaries {
+        red: (0.625, 0.328125),
+        green: (0.296875, 0.59375),
+        blue: (0.15625, 0.0625),
+        white: (0.3125, 0.328125),
+    };
+
+    let rles = [
+        RleMode::New,
+        RleMode::Old,
+        RleMode::Auto,
+        RleMode::Uncompressed,
+    ];
+    let eols = [LineEnding::Lf, LineEnding::Crlf];
+    let magics = [MagicLine::Radiance, MagicLine::Rgbe];
+    let orientations = [
+        Orientation::Standard,
+        Orientation::FlipX,
+        Orientation::Rotate180,
+        Orientation::FlipY,
+        Orientation::Rotate90Cw,
+        Orientation::Rotate90CwFlipY,
+        Orientation::Rotate90Ccw,
+        Orientation::Rotate90CcwFlipY,
+    ];
+    let formats = [HdrFormat::Rgbe, HdrFormat::Xyze];
+
+    let (w, h) = (12u32, 9u32); // both axes inside new-RLE 8..=32767
+    let mut cases = 0usize;
+
+    for &rle in &rles {
+        for &eol in &eols {
+            for magic in &magics {
+                for &orientation in &orientations {
+                    for &format in &formats {
+                        let mut img = gradient(w, h);
+                        img.header.format = format;
+                        img.header.set_orientation(orientation);
+                        img.header.exposure = Some(exposure);
+                        img.header.gamma = Some(gamma);
+                        img.header.pixaspect = Some(pixaspect);
+                        img.header.colorcorr = Some(colorcorr);
+                        img.header.primaries = Some(primaries);
+                        img.header.software = Some("oxideav-test 1.0".to_string());
+                        img.header.view = Some("rvu -vp 0 0 1 -vd 0 0 -1".to_string());
+                        img.header
+                            .commands
+                            .push("rpict -vf scene.vp scene.oct".to_string());
+
+                        let bytes = encode_hdr_with_full_options(&img, rle, eol, magic.clone())
+                            .expect("encode must succeed for in-range dims");
+
+                        let fallback = match rle {
+                            RleMode::Uncompressed => FallbackMode::Uncompressed,
+                            _ => FallbackMode::OldRle,
+                        };
+                        let back = parse_hdr_with_options(&bytes, fallback)
+                            .expect("encoder output must decode");
+
+                        let tag = format!("{rle:?}/{eol:?}/{magic:?}/{orientation:?}/{format:?}");
+                        assert_eq!(back.width, w, "{tag}: width");
+                        assert_eq!(back.height, h, "{tag}: height");
+                        assert_eq!(back.pixels.len(), (w * h * 3) as usize, "{tag}: buf len");
+                        assert_eq!(back.header.format, format, "{tag}: FORMAT");
+                        assert_eq!(back.header.orientation(), orientation, "{tag}: orientation");
+
+                        let approx = |a: f32, b: f32| (a - b).abs() < 1e-4;
+                        assert!(
+                            back.header.exposure.map(|e| approx(e, exposure)) == Some(true),
+                            "{tag}: EXPOSURE {:?}",
+                            back.header.exposure
+                        );
+                        assert!(
+                            back.header.gamma.map(|g| approx(g, gamma)) == Some(true),
+                            "{tag}: GAMMA {:?}",
+                            back.header.gamma
+                        );
+                        assert!(
+                            back.header.pixaspect.map(|p| approx(p, pixaspect)) == Some(true),
+                            "{tag}: PIXASPECT {:?}",
+                            back.header.pixaspect
+                        );
+                        let cc = back.header.colorcorr.expect("COLORCORR present");
+                        assert!(
+                            approx(cc[0], colorcorr[0])
+                                && approx(cc[1], colorcorr[1])
+                                && approx(cc[2], colorcorr[2]),
+                            "{tag}: COLORCORR {cc:?}"
+                        );
+                        let p = back.header.primaries.expect("PRIMARIES present");
+                        assert!(approx(p.red.0, primaries.red.0), "{tag}: PRIMARIES red.x");
+                        assert!(
+                            approx(p.white.1, primaries.white.1),
+                            "{tag}: PRIMARIES white.y"
+                        );
+                        assert_eq!(
+                            back.header.software.as_deref(),
+                            Some("oxideav-test 1.0"),
+                            "{tag}: SOFTWARE"
+                        );
+                        assert!(
+                            back.header
+                                .commands
+                                .iter()
+                                .any(|c| c == "rpict -vf scene.vp scene.oct"),
+                            "{tag}: command line {:?}",
+                            back.header.commands
+                        );
+                        cases += 1;
+                    }
+                }
+            }
+        }
+    }
+    // 4 RLE × 2 EOL × 2 magic × 8 orientation × 2 format = 256 cases.
+    assert_eq!(cases, 256, "expected the full 256-case matrix");
 }

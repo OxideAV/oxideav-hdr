@@ -27,7 +27,7 @@ fuzz_target!(|data: &[u8]| {
     // line-delimited UTF-8 and a stray NUL would just look like one
     // more byte in a value, which doesn't add coverage. Skip the
     // input rather than smuggle them in.
-    if data.iter().any(|&b| b == 0) {
+    if data.contains(&0) {
         return;
     }
     // Cap the header body so libFuzzer's corpus doesn't bloat with
