@@ -588,18 +588,23 @@ fn full_option_matrix_round_trips_typed_header_and_orientation() {
 }
 
 /// Build a minimal valid HDR text container (magic + `FORMAT` + blank
-/// line + resolution line) for a single `width × 1` old-RLE scanline,
-/// appending the caller-supplied raw scanline bytes. Width is kept below
-/// 8 so the new-RLE marker can never fire and `parse_hdr`'s default
-/// `FallbackMode::OldRle` governs the scanline.
-fn old_rle_one_row_file(width: usize, scanline: &[u8]) -> Vec<u8> {
+/// line + resolution line) for a `width × height` old-RLE picture,
+/// appending the caller-supplied raw pixel-section bytes. Width is kept
+/// below 8 so the new-RLE marker can never fire and `parse_hdr`'s default
+/// `FallbackMode::OldRle` governs every scanline.
+fn old_rle_file(width: usize, height: usize, pixels: &[u8]) -> Vec<u8> {
     let mut bytes = Vec::new();
     bytes.extend_from_slice(b"#?RADIANCE\n");
     bytes.extend_from_slice(b"FORMAT=32-bit_rle_rgbe\n");
     bytes.extend_from_slice(b"\n");
-    bytes.extend_from_slice(format!("-Y 1 +X {width}\n").as_bytes());
-    bytes.extend_from_slice(scanline);
+    bytes.extend_from_slice(format!("-Y {height} +X {width}\n").as_bytes());
+    bytes.extend_from_slice(pixels);
     bytes
+}
+
+/// Single-row convenience over [`old_rle_file`].
+fn old_rle_one_row_file(width: usize, scanline: &[u8]) -> Vec<u8> {
+    old_rle_file(width, 1, scanline)
 }
 
 #[test]
@@ -646,4 +651,42 @@ fn public_parse_accepts_old_rle_literal_then_sentinel_first_scanline() {
         );
     }
     assert!(p0[0] > 0.0 && p0[1] > 0.0 && p0[2] > 0.0);
+}
+
+#[test]
+fn public_parse_accepts_old_rle_run_spanning_scanline_boundary() {
+    // An old-RLE run may legitimately continue across the scanline
+    // boundary: the decoder carries the previous pixel from one scanline
+    // into the next, so the *second* scanline may legally open with a
+    // sentinel that repeats the last pixel of the first. Our own encoder
+    // never emits this (it resets per scanline), but the decoder must
+    // accept it for interop with writers that do — and the round-378
+    // leading-sentinel guard must NOT misfire here, since `prev_pixel`
+    // is established.
+    //
+    // 4×2 picture, all eight pixels identical. Row 1: one literal then a
+    // 3× sentinel (4 pixels). Row 2: a 4× sentinel repeating the carried
+    // pixel — it *begins* with a sentinel.
+    let pixels = [
+        // row 1
+        0x10, 0x20, 0x30, 0x80, // literal establishes the pixel
+        0x01, 0x01, 0x01, 0x03, // repeat 3× → row 1 complete (4 px)
+        // row 2 — opens with a sentinel, legal because prev carries over
+        0x01, 0x01, 0x01, 0x04, // repeat the carried pixel 4× → row 2 (4 px)
+    ];
+    let file = old_rle_file(4, 2, &pixels);
+    let img = parse_hdr(&file).unwrap();
+    assert_eq!(img.width, 4);
+    assert_eq!(img.height, 2);
+    // All 8 pixels decode to the same strictly-positive RGB triple.
+    let p0 = [img.pixels[0], img.pixels[1], img.pixels[2]];
+    assert!(p0[0] > 0.0 && p0[1] > 0.0 && p0[2] > 0.0);
+    for px in 0..8 {
+        let off = px * 3;
+        assert_eq!(
+            [img.pixels[off], img.pixels[off + 1], img.pixels[off + 2]],
+            p0,
+            "pixel {px} diverged"
+        );
+    }
 }
