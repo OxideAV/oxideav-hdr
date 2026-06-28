@@ -291,6 +291,15 @@ fn decode_old_rle(
         Vec::with_capacity(width),
         Vec::with_capacity(width),
     ];
+    // A sentinel repeats the *previous* pixel, so it is only legal once a
+    // previous pixel exists — either carried in from an earlier scanline
+    // (`prev_pixel.is_some()`) or already emitted as a literal earlier in
+    // this scanline. The staged spec is explicit: "The first scanline
+    // cannot be a sentinel run (there's no previous pixel)" — and more
+    // generally a sentinel with no established previous pixel is malformed
+    // (the pre-round-378 decoder silently repeated black `[0, 0, 0, 0]`
+    // for such a file rather than rejecting it).
+    let mut have_prev = prev_pixel.is_some();
     let mut last = prev_pixel.unwrap_or([0, 0, 0, 0]);
     let mut shift = 0u32;
     let mut written = 0usize;
@@ -301,6 +310,11 @@ fn decode_old_rle(
         let pixel = [src[*pos], src[*pos + 1], src[*pos + 2], src[*pos + 3]];
         *pos += 4;
         if pixel[0] == 1 && pixel[1] == 1 && pixel[2] == 1 {
+            if !have_prev {
+                return Err(Error::invalid(
+                    "HDR: old-RLE leading sentinel with no previous pixel",
+                ));
+            }
             // Sentinel: low 8 bits of a run-length stored in the
             // exponent byte; chained sentinels accumulate higher bytes.
             let chunk = (pixel[3] as u32) << shift;
@@ -333,6 +347,7 @@ fn decode_old_rle(
             out[2].push(pixel[2]);
             out[3].push(pixel[3]);
             last = pixel;
+            have_prev = true;
             shift = 0;
             written += 1;
         }
@@ -668,6 +683,62 @@ mod tests {
         assert_eq!(chans[1], vec![0x66; 6]);
         assert_eq!(chans[2], vec![0x77; 6]);
         assert_eq!(chans[3], vec![0x80; 6]);
+    }
+
+    #[test]
+    fn old_rle_leading_sentinel_with_no_previous_pixel_is_rejected() {
+        // A scanline that *begins* with a sentinel `(1, 1, 1, n)` when no
+        // previous pixel has been established (first scanline of the
+        // picture) is malformed per the staged spec ("The first scanline
+        // cannot be a sentinel run — there's no previous pixel"). The
+        // decoder must reject it rather than silently repeating black.
+        let pixels = [
+            0x01, 0x01, 0x01, 0x05, // leading sentinel — illegal here
+            0x55, 0x66, 0x77, 0x80,
+        ];
+        let mut pos = 0;
+        let mut prev = None;
+        let err = super::decode_old_rle(&pixels, &mut pos, 6, &mut prev).unwrap_err();
+        assert!(
+            err.to_string().contains("leading sentinel"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn old_rle_leading_sentinel_continuing_prior_scanline_is_accepted() {
+        // The same leading-sentinel bytes ARE legal when a previous pixel
+        // was carried in from an earlier scanline — an old-RLE run may span
+        // the scanline boundary, repeating the last pixel of the prior row.
+        let pixels = [
+            0x01, 0x01, 0x01, 0x03, // sentinel: repeat the carried-in pixel 3×
+            0x40, 0x50, 0x60, 0x80, // then a literal
+        ];
+        let mut pos = 0;
+        let mut prev = Some([0xAA, 0xBB, 0xCC, 0x81]);
+        let chans = super::decode_old_rle(&pixels, &mut pos, 4, &mut prev).unwrap();
+        assert_eq!(chans[0], vec![0xAA, 0xAA, 0xAA, 0x40]);
+        assert_eq!(chans[1], vec![0xBB, 0xBB, 0xBB, 0x50]);
+        assert_eq!(chans[2], vec![0xCC, 0xCC, 0xCC, 0x60]);
+        assert_eq!(chans[3], vec![0x81, 0x81, 0x81, 0x80]);
+        // The carried-in previous pixel is updated to the trailing literal.
+        assert_eq!(prev, Some([0x40, 0x50, 0x60, 0x80]));
+    }
+
+    #[test]
+    fn old_rle_sentinel_after_literal_in_first_scanline_is_accepted() {
+        // A sentinel that follows a literal *within the first scanline* is
+        // legal — the literal establishes the previous pixel. This is the
+        // ordinary run case and must still decode.
+        let pixels = [
+            0x55, 0x66, 0x77, 0x80, // literal establishes prev
+            0x01, 0x01, 0x01, 0x02, // repeat it twice more
+        ];
+        let mut pos = 0;
+        let mut prev = None;
+        let chans = super::decode_old_rle(&pixels, &mut pos, 3, &mut prev).unwrap();
+        assert_eq!(chans[0], vec![0x55; 3]);
+        assert_eq!(chans[3], vec![0x80; 3]);
     }
 
     fn decode_old_rle_only(src: &[u8], width: usize) -> [Vec<u8>; 4] {

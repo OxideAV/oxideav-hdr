@@ -9,6 +9,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Other
 
+- round 378 (depth — old-RLE decode robustness): reject a leading
+  run-length *sentinel* `(1, 1, 1, n)` that appears with **no previous
+  pixel established** (the first scanline of the picture, or any old-RLE
+  scanline decoded with no carried-in `prev_pixel`). The staged spec
+  (`docs/image/hdr/radiance-hdr-rgbe-format.md`, "Old run-length encoded")
+  reserves `(1, 1, 1, *)` for the repeat-of-the-*previous*-pixel role and
+  states "The first scanline cannot be a sentinel run (there's no previous
+  pixel)". Through round 377 the decoder silently accepted such a
+  malformed file, repeating the implicit black pixel `[0, 0, 0, 0]`
+  `unwrap_or` seeds instead of surfacing an error. The decoder now tracks
+  whether a previous pixel exists — carried in from an earlier scanline
+  (`prev_pixel.is_some()`) or already emitted as a literal earlier in the
+  same scanline — and returns `HDR: old-RLE leading sentinel with no
+  previous pixel` when a sentinel is the very first thing it sees. A
+  sentinel that *continues a run across the scanline boundary* (previous
+  pixel carried in) and a sentinel that *follows a literal within the
+  first scanline* both remain valid and decode unchanged; three new
+  `src/rle.rs` tests pin the rejection, the cross-scanline-continuation
+  acceptance, and the after-a-literal acceptance. No encoder change (the
+  old-RLE writer already never emits a leading sentinel — its first pixel
+  is always a literal), and the full round-trip / fixture suite is
+  unaffected
 - round 373 (depth — encoder fuzz target + full-option round-trip matrix): add a sixth `cargo-fuzz` target `encode` that drives the **encoder** across the full cross-product of its on-wire options — the four `RleMode` flavours (New / Old / Auto / Uncompressed) × `Lf`/`Crlf` line endings × `#?RADIANCE`/`#?RGBE` magic spellings × all eight resolution-string orientations × RGBE/XYZE `FORMAT` — each carrying a fuzz-built header with every typed record (`EXPOSURE` / `GAMMA` / `PIXASPECT` / `COLORCORR` / `PRIMARIES` / `SOFTWARE` / `VIEW`) plus a program/command line. It encodes via `encode_hdr_with_full_options`, decodes with the `FallbackMode` matching the chosen RLE flavour, and asserts the decoded dimensions, pixel-format, buffer length, `FORMAT`, orientation and every typed header record round-trip within tolerance. The existing `roundtrip` target only ever exercised the `encode_hdr` *default* path (RADIANCE magic + all-default header + New-RLE + `Lf`), leaving the header writer (seven typed records + commands + free-form extras), the three non-default RLE flavours, the CRLF terminator, the legacy magic spelling, the XYZE `FORMAT`, and the seven non-standard orientations unfuzzed — this target reaches all of them. The same matrix is pinned deterministically as a 256-case integration test (`full_option_matrix_round_trips_typed_header_and_orientation` in `tests/roundtrip.rs`: 4 RLE × 2 EOL × 2 magic × 8 orientation × 2 format) so a header-writer / parser asymmetry surfaces in CI without a fuzz run. Also fixes a pre-existing `clippy::manual_contains` lint in the `headers` fuzz target so the whole fuzz crate is clippy-clean
 - round 366 (depth — scene-referred radiance recovery subsystem, end-to-end): a public-API integration test (`tests/roundtrip.rs`) proving the recovery survives a real encode→decode cycle — build a picture whose stored channels are a known scene radiance scaled by the `EXPOSURE` + `COLORCORR` the writer bakes in, `encode_hdr` → `parse_hdr`, then confirm both `scene_referred_radiance_buffer` (non-mutating; slots survive) and `recover_scene_referred_radiance` (in-place; slots cleared) recover the original radiance, and that a re-encode after the in-place recovery no longer carries the `EXPOSURE=` / `COLORCORR=` records
 - round 366 (depth — scene-referred radiance recovery subsystem, cont.): add `HdrImage::recover_scene_referred_radiance` — the one-shot in-place composition of `recover_original_radiance` + `recover_original_colorcorr`. Divides *both* the cumulative `EXPOSURE=` multiplier and the `COLORCORR=` triple out of the stored channels and clears both header slots, the full §1 recovery the staged spec describes in a single call rather than the two-step mutator dance. It is the mutating counterpart to `scene_referred_radiance_buffer` (the two leave the buffer holding identical recovered values; a new test pins that equivalence). The component mutators' edge-case handling carries over verbatim — `None` slots, the trivial `1.0` / `[1, 1, 1]` factors, and any `0.0`/non-finite factor are no-op divisions (slots still cleared), so a malformed header can never write NaN / ∞; a second call is a no-op. Five new image-module tests cover the divide-and-clear contract, the buffer-view equivalence, the no-records no-op, the degenerate-factor clear-without-poison + idempotence, and the inverse-of-`apply_exposure`+`apply_colorcorr` round-trip
