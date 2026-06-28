@@ -45,7 +45,7 @@ No external library source consulted.
 | `rgbe_channel_scale([u8; 4]) -> Option<f32>` (the spec-§3 decode-formula factor `f = ldexp(1.0, byte − (128 + 8))` such that each channel equals `mantissa * f`, or `None` for the all-zero sentinel — `Some(2⁻⁷)` for the spec-canonical worked example `(128, 64, 32, 129)`; completes the quad-inspector trio) | inspector | n/a |
 | 32-bit_rle_xyze pixels       |  Y   |   Y (with helpers in `xyz`) |
 | New RLE (`0x02 0x02 hi lo`)  |  Y   |   Y   |
-| Old RLE (sentinel pixels)    |  Y   |   Y (`RleMode::Old`) |
+| Old RLE (sentinel pixels) — including runs that **span the scanline boundary** (a sentinel as the first quad of a later scanline repeats the carried-over previous pixel), and a spec-conformant rejection of a **leading sentinel with no previous pixel** (a sentinel as the very first quad of the picture is malformed per the format note's "the first scanline cannot be a sentinel run", surfaced as an error rather than silently decoding a black run) |  Y   |   Y (`RleMode::Old`) |
 | Auto-RLE (width heuristic)   |  -   |   Y (`RleMode::Auto`) |
 | Uncompressed (flat `4 * W` byte) scanlines | Y (`parse_hdr_with_options(_, FallbackMode::Uncompressed)`) | Y (`RleMode::Uncompressed`) |
 | CRLF line endings            |  Y   |   Y (`LineEnding::Crlf`) |
