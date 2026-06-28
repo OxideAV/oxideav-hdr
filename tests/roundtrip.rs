@@ -586,3 +586,64 @@ fn full_option_matrix_round_trips_typed_header_and_orientation() {
     // 4 RLE × 2 EOL × 2 magic × 8 orientation × 2 format = 256 cases.
     assert_eq!(cases, 256, "expected the full 256-case matrix");
 }
+
+/// Build a minimal valid HDR text container (magic + `FORMAT` + blank
+/// line + resolution line) for a single `width × 1` old-RLE scanline,
+/// appending the caller-supplied raw scanline bytes. Width is kept below
+/// 8 so the new-RLE marker can never fire and `parse_hdr`'s default
+/// `FallbackMode::OldRle` governs the scanline.
+fn old_rle_one_row_file(width: usize, scanline: &[u8]) -> Vec<u8> {
+    let mut bytes = Vec::new();
+    bytes.extend_from_slice(b"#?RADIANCE\n");
+    bytes.extend_from_slice(b"FORMAT=32-bit_rle_rgbe\n");
+    bytes.extend_from_slice(b"\n");
+    bytes.extend_from_slice(format!("-Y 1 +X {width}\n").as_bytes());
+    bytes.extend_from_slice(scanline);
+    bytes
+}
+
+#[test]
+fn public_parse_rejects_leading_old_rle_sentinel_first_scanline() {
+    // The first scanline of the picture cannot begin with a run-length
+    // sentinel `(1, 1, 1, n)` — there is no previous pixel for it to
+    // repeat. `parse_hdr` (default `FallbackMode::OldRle`) must surface
+    // an error rather than silently decoding a black run. Width 4 keeps
+    // the scanline off the new-RLE marker path.
+    let scanline = [
+        0x01, 0x01, 0x01, 0x03, // illegal leading sentinel
+        0x10, 0x20, 0x30, 0x80, // a literal that would follow
+    ];
+    let file = old_rle_one_row_file(4, &scanline);
+    let err = parse_hdr(&file).unwrap_err();
+    assert!(
+        err.to_string().contains("leading sentinel"),
+        "expected leading-sentinel rejection, got: {err}"
+    );
+}
+
+#[test]
+fn public_parse_accepts_old_rle_literal_then_sentinel_first_scanline() {
+    // The positive control: a first scanline that opens with a literal
+    // (establishing the previous pixel) followed by a sentinel run still
+    // decodes through the public API. Four pixels: one literal, then a
+    // 3× repeat of it.
+    let scanline = [
+        0x10, 0x20, 0x30, 0x80, // literal establishes prev
+        0x01, 0x01, 0x01, 0x03, // repeat it 3× → 4 pixels total
+    ];
+    let file = old_rle_one_row_file(4, &scanline);
+    let img = parse_hdr(&file).unwrap();
+    assert_eq!(img.width, 4);
+    assert_eq!(img.height, 1);
+    // All four decoded pixels share the literal's RGBE, so the decoded
+    // float RGB triples are all identical and strictly positive.
+    let p0 = [img.pixels[0], img.pixels[1], img.pixels[2]];
+    for px in 0..4 {
+        let off = px * 3;
+        assert_eq!(
+            [img.pixels[off], img.pixels[off + 1], img.pixels[off + 2]],
+            p0
+        );
+    }
+    assert!(p0[0] > 0.0 && p0[1] > 0.0 && p0[2] > 0.0);
+}
