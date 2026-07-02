@@ -9,6 +9,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Other
 
+- round 383 (XYZE photometric semantics, cont. — file-faithful format
+  converters): six new `xyz` helpers,
+  `convert_image_rgb_to_xyz_photometric` /
+  `convert_image_xyz_to_rgb_photometric` (named [`RgbColorSpace`]),
+  their `_with_primaries` wide-gamut counterparts (arbitrary
+  `PRIMARIES=` record, `bool` return, picture untouched on a degenerate
+  record), and the `_with_effective_primaries` wrappers threading the
+  file's own record / reference-manual default. Per the staged spec's
+  §"Physical interpretation" the two `FORMAT`s store their channels on
+  *different physical scales* — an RGBE primary is spectral radiance
+  (pixel `(1,1,1)` ⇒ 1 watt/sr/m² over the visible spectrum) while an
+  XYZE file's "Y primary is already lumens/steradian/m²" — so a format
+  conversion that keeps the picture physically consistent must compose
+  the colorimetric `RGB ↔ XYZ` matrix with the `WHTEFFICACY = 179` lm/W
+  radiometric ↔ photometric scale (applied uniformly to all three
+  tristimulus channels, preserving chromaticity; folded into the matrix
+  so the pixel walk stays single-pass). The existing converters remain
+  purely colorimetric — appropriate for abstract colour work but they
+  produce an XYZE file whose stored Y understates the spec-documented
+  photometric meaning by 179×. Six new tests pin the 179×-the-
+  colorimetric-output relation, the luminance-preservation invariant
+  (`luminance_buffer` before an RGBE→XYZE conversion agrees with the
+  converted picture's XYZE luminance within the spec coefficients'
+  3-decimal rounding, and again after the reverse leg), the identity
+  round-trip in both named spaces and P3-D65, the degenerate-record
+  untouched contract, and the effective-primaries threading (header
+  record + RADIANCE default)
 - round 383 (spec-conformance — XYZE photometric luminance): fix the
   `luminance_lm_per_sr_per_m2` XYZE branch (and everything downstream of
   it: `HdrImage::luminance_buffer`, `scene_referred_luminance_buffer`) to

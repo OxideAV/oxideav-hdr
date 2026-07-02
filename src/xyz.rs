@@ -250,6 +250,151 @@ pub fn convert_image_rgb_to_xyz_with_effective_primaries(image: &mut crate::HdrI
     convert_image_rgb_to_xyz_with_primaries(image, p)
 }
 
+/// Scale every element of a 3×3 matrix by `s`.
+#[inline]
+fn scale_matrix(m: [[f32; 3]; 3], s: f32) -> [[f32; 3]; 3] {
+    let mut out = m;
+    for row in &mut out {
+        for v in row {
+            *v *= s;
+        }
+    }
+    out
+}
+
+/// Convert an **RGBE-file** picture (spectral radiance, watts/sr/m²)
+/// into an **XYZE-file** picture (photometric scale, lumens/sr/m²),
+/// in-place, preserving the picture's physical meaning.
+///
+/// Per the staged spec's §"Physical interpretation"
+/// (`docs/image/hdr/radiance-hdr-rgbe-format.md`), the two `FORMAT`s
+/// store their channels on *different physical scales*: an RGBE
+/// primary is spectral radiance over its waveband (pixel `(1,1,1)` ⇒
+/// 1 watt/sr/m² over the visible spectrum), while an XYZE file's "Y
+/// primary is already lumens/steradian/m²". A format conversion that
+/// keeps the picture physically consistent therefore composes the
+/// colorimetric `RGB → XYZ` matrix with the `WHTEFFICACY = 179` lm/W
+/// radiometric → photometric scale, applied uniformly to all three
+/// tristimulus channels (a uniform scale preserves chromaticity).
+///
+/// The plain [`convert_image_rgb_to_xyz`] is the purely *colorimetric*
+/// counterpart — it leaves the numbers on the radiometric scale, which
+/// is appropriate when the caller treats both buffers as abstract
+/// colour but produces an XYZE file whose stored Y understates the
+/// spec-documented photometric meaning by 179×. This helper is the one
+/// to use when the converted picture will be consumed (or re-encoded)
+/// *as an XYZE file*: after it runs, [`crate::HdrImage::luminance_buffer`]
+/// on the converted picture agrees with the value it reported on the
+/// original RGBE picture (exactly when `space` is
+/// [`RgbColorSpace::Radiance`], whose matrix Y row matches the spec's
+/// photopic weights to their published 3-decimal rounding).
+pub fn convert_image_rgb_to_xyz_photometric(image: &mut crate::HdrImage, space: RgbColorSpace) {
+    let m = scale_matrix(rgb_to_xyz_matrix(space), WHTEFFICACY);
+    for px in image.pixels.chunks_exact_mut(3) {
+        let v = apply_matrix(m, [px[0], px[1], px[2]]);
+        px[0] = v[0];
+        px[1] = v[1];
+        px[2] = v[2];
+    }
+    image.header.format = crate::HdrFormat::Xyze;
+}
+
+/// Inverse of [`convert_image_rgb_to_xyz_photometric`]: convert an
+/// **XYZE-file** picture (photometric scale, lumens/sr/m²) into an
+/// **RGBE-file** picture (spectral radiance, watts/sr/m²), in-place.
+///
+/// Divides the `WHTEFFICACY = 179` lm/W efficacy factor back out (the
+/// XYZE channels are stored on the photometric scale per the staged
+/// spec's §"Physical interpretation") while applying the colorimetric
+/// `XYZ → RGB` matrix, so the resulting RGBE picture carries genuine
+/// spectral radiance and its [`crate::HdrImage::luminance_buffer`]
+/// agrees with the XYZE original. The plain [`convert_image_xyz_to_rgb`]
+/// is the purely colorimetric counterpart (no scale change).
+pub fn convert_image_xyz_to_rgb_photometric(image: &mut crate::HdrImage, space: RgbColorSpace) {
+    let m = scale_matrix(xyz_to_rgb_matrix(space), 1.0 / WHTEFFICACY);
+    for px in image.pixels.chunks_exact_mut(3) {
+        let v = apply_matrix(m, [px[0], px[1], px[2]]);
+        px[0] = v[0];
+        px[1] = v[1];
+        px[2] = v[2];
+    }
+    image.header.format = crate::HdrFormat::Rgbe;
+}
+
+/// Wide-gamut counterpart to [`convert_image_rgb_to_xyz_photometric`]:
+/// the colorimetric matrix is derived from an arbitrary
+/// [`crate::Primaries`] record via [`rgb_to_xyz_matrix_from_primaries`]
+/// and composed with the `WHTEFFICACY` radiometric → photometric scale.
+///
+/// Returns `true` when the conversion ran and `false` when the supplied
+/// primaries are degenerate (any zero `y` chromaticity, singular
+/// unscaled matrix); on the degenerate branch the pixel buffer and
+/// format tag are left untouched, matching
+/// [`convert_image_rgb_to_xyz_with_primaries`].
+pub fn convert_image_rgb_to_xyz_photometric_with_primaries(
+    image: &mut crate::HdrImage,
+    primaries: crate::Primaries,
+) -> bool {
+    let m = match rgb_to_xyz_matrix_from_primaries(primaries) {
+        Some(m) => scale_matrix(m, WHTEFFICACY),
+        None => return false,
+    };
+    for px in image.pixels.chunks_exact_mut(3) {
+        let v = apply_matrix(m, [px[0], px[1], px[2]]);
+        px[0] = v[0];
+        px[1] = v[1];
+        px[2] = v[2];
+    }
+    image.header.format = crate::HdrFormat::Xyze;
+    true
+}
+
+/// Wide-gamut counterpart to [`convert_image_xyz_to_rgb_photometric`]:
+/// derives the colorimetric matrix from an arbitrary
+/// [`crate::Primaries`] record and divides the `WHTEFFICACY` factor
+/// back out in the same single pass.
+///
+/// Same `bool` contract as
+/// [`convert_image_xyz_to_rgb_with_primaries`] — `false` leaves the
+/// picture untouched on a degenerate record.
+pub fn convert_image_xyz_to_rgb_photometric_with_primaries(
+    image: &mut crate::HdrImage,
+    primaries: crate::Primaries,
+) -> bool {
+    let m = match xyz_to_rgb_matrix_from_primaries(primaries) {
+        Some(m) => scale_matrix(m, 1.0 / WHTEFFICACY),
+        None => return false,
+    };
+    for px in image.pixels.chunks_exact_mut(3) {
+        let v = apply_matrix(m, [px[0], px[1], px[2]]);
+        px[0] = v[0];
+        px[1] = v[1];
+        px[2] = v[2];
+    }
+    image.header.format = crate::HdrFormat::Rgbe;
+    true
+}
+
+/// [`convert_image_rgb_to_xyz_photometric_with_primaries`] threading
+/// the picture's own [`crate::HdrImage::effective_primaries`] (header
+/// `PRIMARIES=` record, or the reference-manual default
+/// [`crate::Primaries::RADIANCE`] when no record was present).
+pub fn convert_image_rgb_to_xyz_photometric_with_effective_primaries(
+    image: &mut crate::HdrImage,
+) -> bool {
+    let p = image.effective_primaries();
+    convert_image_rgb_to_xyz_photometric_with_primaries(image, p)
+}
+
+/// [`convert_image_xyz_to_rgb_photometric_with_primaries`] threading
+/// the picture's own [`crate::HdrImage::effective_primaries`].
+pub fn convert_image_xyz_to_rgb_photometric_with_effective_primaries(
+    image: &mut crate::HdrImage,
+) -> bool {
+    let p = image.effective_primaries();
+    convert_image_xyz_to_rgb_photometric_with_primaries(image, p)
+}
+
 /// Radiance's standard luminous efficacy of equal-energy white,
 /// `WHTEFFICACY` in `src/common/color.h`. The constant that turns
 /// reference-encoder watts/sr/m² into lumens/sr/m².
@@ -900,5 +1045,177 @@ mod tests {
                 "round-trip pixel {i}: {want} vs {got}"
             );
         }
+    }
+
+    #[test]
+    fn photometric_rgb_to_xyz_is_colorimetric_times_whtefficacy() {
+        // The photometric converter composes the colorimetric matrix
+        // with the uniform 179 lm/W scale — every output channel must be
+        // exactly WHTEFFICACY × the plain converter's output.
+        use crate::HdrImage;
+        let rgb = vec![0.55_f32, 0.35, 0.20, 0.10, 0.80, 0.45];
+        let mut photo = HdrImage::new_rgb96f(2, 1, rgb.clone());
+        let mut color = HdrImage::new_rgb96f(2, 1, rgb);
+        convert_image_rgb_to_xyz_photometric(&mut photo, RgbColorSpace::Radiance);
+        convert_image_rgb_to_xyz(&mut color, RgbColorSpace::Radiance);
+        assert_eq!(photo.header.format, crate::HdrFormat::Xyze);
+        for (i, (p, c)) in photo.pixels.iter().zip(color.pixels.iter()).enumerate() {
+            let want = c * WHTEFFICACY;
+            assert!(
+                (p - want).abs() < want.abs() * 1e-5 + 1e-5,
+                "ch {i}: photometric={p} colorimetric×179={want}"
+            );
+        }
+    }
+
+    #[test]
+    fn photometric_conversion_preserves_luminance_buffer() {
+        // The whole point of the file-faithful conversion: the picture's
+        // photometric luminance (per the staged spec's §"Physical
+        // interpretation", computed with the format-appropriate branch)
+        // must survive the RGBE-file → XYZE-file conversion. With the
+        // Radiance working space the matrix Y row matches the spec's
+        // photopic weights to their published 3-decimal rounding, so the
+        // agreement is within ~0.1 %.
+        use crate::HdrImage;
+        let rgb = vec![1.0_f32, 0.5, 0.25, 0.1, 0.8, 0.3, 2.0, 2.0, 2.0];
+        let mut img = HdrImage::new_rgb96f(3, 1, rgb);
+        let before = img.luminance_buffer(); // RGBE branch: 179 × weights.
+        convert_image_rgb_to_xyz_photometric(&mut img, RgbColorSpace::Radiance);
+        let after = img.luminance_buffer(); // XYZE branch: Y verbatim.
+        for (i, (b, a)) in before.iter().zip(after.iter()).enumerate() {
+            assert!(
+                (b - a).abs() < b.abs() * 2e-3 + 1e-4,
+                "pixel {i}: RGBE luminance {b} vs converted-XYZE luminance {a}"
+            );
+        }
+        // …and back: the reverse conversion restores the RGBE luminance.
+        convert_image_xyz_to_rgb_photometric(&mut img, RgbColorSpace::Radiance);
+        let back = img.luminance_buffer();
+        for (i, (b, a)) in before.iter().zip(back.iter()).enumerate() {
+            assert!(
+                (b - a).abs() < b.abs() * 2e-3 + 1e-4,
+                "pixel {i}: original {b} vs round-tripped {a}"
+            );
+        }
+    }
+
+    #[test]
+    fn photometric_round_trip_recovers_rgb() {
+        // RGB → photometric XYZ → RGB is the identity within f32
+        // precision, in both named working spaces.
+        use crate::HdrImage;
+        for space in [RgbColorSpace::Srgb, RgbColorSpace::Radiance] {
+            let original = vec![0.55_f32, 0.35, 0.20, 0.10, 0.80, 0.45];
+            let mut img = HdrImage::new_rgb96f(2, 1, original.clone());
+            convert_image_rgb_to_xyz_photometric(&mut img, space);
+            assert_eq!(img.header.format, crate::HdrFormat::Xyze);
+            convert_image_xyz_to_rgb_photometric(&mut img, space);
+            assert_eq!(img.header.format, crate::HdrFormat::Rgbe);
+            for (i, (got, want)) in img.pixels.iter().zip(original.iter()).enumerate() {
+                assert!(
+                    (got - want).abs() < 1e-4,
+                    "space {space:?} pixel {i}: {want} vs {got}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn photometric_with_primaries_round_trips_and_scales() {
+        // The wide-gamut photometric pair: P3-D65 there-and-back is the
+        // identity, and the forward leg is 179× the colorimetric one.
+        use crate::HdrImage;
+        let original = vec![0.55_f32, 0.35, 0.20];
+        let mut img = HdrImage::new_rgb96f(1, 1, original.clone());
+        let mut color = HdrImage::new_rgb96f(1, 1, original.clone());
+        assert!(convert_image_rgb_to_xyz_photometric_with_primaries(
+            &mut img,
+            crate::Primaries::P3_D65
+        ));
+        assert!(convert_image_rgb_to_xyz_with_primaries(
+            &mut color,
+            crate::Primaries::P3_D65
+        ));
+        for (p, c) in img.pixels.iter().zip(color.pixels.iter()) {
+            let want = c * WHTEFFICACY;
+            assert!((p - want).abs() < want.abs() * 1e-5 + 1e-5);
+        }
+        assert!(convert_image_xyz_to_rgb_photometric_with_primaries(
+            &mut img,
+            crate::Primaries::P3_D65
+        ));
+        assert_eq!(img.header.format, crate::HdrFormat::Rgbe);
+        for (i, (got, want)) in img.pixels.iter().zip(original.iter()).enumerate() {
+            assert!(
+                (got - want).abs() < 1e-4,
+                "round-trip pixel {i}: {want} vs {got}"
+            );
+        }
+    }
+
+    #[test]
+    fn photometric_with_primaries_rejects_degenerate_record() {
+        // Degenerate chromaticities: `false`, picture untouched — the
+        // same contract as the colorimetric `_with_primaries` pair.
+        use crate::HdrImage;
+        let degenerate = crate::Primaries {
+            red: (0.64, 0.33),
+            green: (0.30, 0.60),
+            blue: (0.15, 0.06),
+            white: (0.333, 0.0), // yW = 0 → singular construction.
+        };
+        let pixels = vec![0.5_f32, 0.4, 0.3];
+        let mut img = HdrImage::new_rgb96f(1, 1, pixels.clone());
+        assert!(!convert_image_rgb_to_xyz_photometric_with_primaries(
+            &mut img, degenerate
+        ));
+        assert_eq!(img.pixels, pixels);
+        assert_eq!(img.header.format, crate::HdrFormat::Rgbe);
+        img.header.format = crate::HdrFormat::Xyze;
+        assert!(!convert_image_xyz_to_rgb_photometric_with_primaries(
+            &mut img, degenerate
+        ));
+        assert_eq!(img.pixels, pixels);
+        assert_eq!(img.header.format, crate::HdrFormat::Xyze);
+    }
+
+    #[test]
+    fn photometric_effective_primaries_threads_header_record() {
+        // The `_with_effective_primaries` wrappers must use the file's
+        // own PRIMARIES= record when present and the reference-manual
+        // default when absent.
+        use crate::HdrImage;
+        let rgb = vec![0.55_f32, 0.35, 0.20];
+        // Header record present: equals an explicit call with the record.
+        let mut a = HdrImage::new_rgb96f(1, 1, rgb.clone());
+        a.header.primaries = Some(crate::Primaries::REC2020);
+        let mut b = HdrImage::new_rgb96f(1, 1, rgb.clone());
+        assert!(convert_image_rgb_to_xyz_photometric_with_effective_primaries(&mut a));
+        assert!(convert_image_rgb_to_xyz_photometric_with_primaries(
+            &mut b,
+            crate::Primaries::REC2020
+        ));
+        for (av, bv) in a.pixels.iter().zip(b.pixels.iter()) {
+            assert!((av - bv).abs() < av.abs() * 1e-6 + 1e-6);
+        }
+        // No record: equals an explicit call with Primaries::RADIANCE.
+        let mut c = HdrImage::new_rgb96f(1, 1, rgb.clone());
+        assert!(c.header.primaries.is_none());
+        let mut d = HdrImage::new_rgb96f(1, 1, rgb);
+        assert!(convert_image_rgb_to_xyz_photometric_with_effective_primaries(&mut c));
+        assert!(convert_image_rgb_to_xyz_photometric_with_primaries(
+            &mut d,
+            crate::Primaries::RADIANCE
+        ));
+        for (cv, dv) in c.pixels.iter().zip(d.pixels.iter()) {
+            assert!((cv - dv).abs() < cv.abs() * 1e-6 + 1e-6);
+        }
+        // And the inverse wrapper closes the loop back to the input.
+        assert!(convert_image_xyz_to_rgb_photometric_with_effective_primaries(&mut c));
+        assert_eq!(c.header.format, crate::HdrFormat::Rgbe);
+        assert!((c.pixels[0] - 0.55).abs() < 1e-4);
+        assert!((c.pixels[1] - 0.35).abs() < 1e-4);
+        assert!((c.pixels[2] - 0.20).abs() < 1e-4);
     }
 }
