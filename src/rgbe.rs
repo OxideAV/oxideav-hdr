@@ -152,6 +152,58 @@ pub fn rgbe_channel_scale(rgbe: [u8; 4]) -> Option<f32> {
     }
 }
 
+/// Scale an RGBE quad by an exact power of two — `2^stops` — entirely
+/// on the wire representation, without ever decoding to `f32`.
+///
+/// The spec-§3 shared-exponent layout makes a power-of-two scale a
+/// pure exponent-byte add: each channel decodes as
+/// `mantissa * 2^(e - 136)`, so replacing `e` with `e + stops`
+/// multiplies all three channels by exactly `2^stops` while the
+/// mantissa bytes — and therefore the pixel's chromaticity — are
+/// untouched. This is the quad-level counterpart to
+/// [`crate::HdrImage::adjust_exposure_stops`]: a whole-file exposure
+/// shift can be performed losslessly on the raw
+/// [`crate::HdrImage::to_rgbe_quads`] stream with no
+/// quantisation round-trip at all.
+///
+/// Returns:
+///
+/// * `Some(shifted)` with `shifted = [r, g, b, e + stops]` when the
+///   new exponent byte stays inside the valid non-sentinel range
+///   `1..=255`.
+/// * `Some(rgbe)` unchanged when the input is a sentinel pixel
+///   (exponent byte `0` — spec §3: "there is no valid pixel with
+///   exponent byte 0", the quad decodes to black, and black scaled by
+///   any power of two is still black). The mantissa bytes are
+///   preserved verbatim rather than canonicalised to `[0, 0, 0, 0]`.
+/// * `None` when the shifted exponent would leave `1..=255` — the
+///   result is not representable as an RGBE pixel (a positive
+///   overflow past byte `255` ⇒ magnitude above `2^127`; an underflow
+///   below byte `1` ⇒ smaller than the format's minimum scale). The
+///   caller decides whether to saturate, flush to black, or fail.
+///
+/// `decode(shift(q, n))` equals `decode(q)` scaled by exactly `2^n`
+/// for every `Some` case — bit-exactly when the scaling is carried in
+/// a format wide enough to represent `2^n` (e.g. `f64`; an `f32`
+/// two-step `decode(q) * 2^n` needs `-149 <= n <= 127` for the scale
+/// itself to be representable). Every decoded output is exact: even
+/// the byte-`1..=8` exponents land on subnormal `f32` values that
+/// still hold `mantissa * 2^(e-136)` precisely, mantissas being ≤ 255.
+#[inline]
+pub fn rgbe_shift_exponent(rgbe: [u8; 4], stops: i32) -> Option<[u8; 4]> {
+    if rgbe[3] == 0 {
+        // Sentinel: decodes to black; black × 2^n = black.
+        return Some(rgbe);
+    }
+    // i64 so an i32-extreme `stops` cannot overflow the addition.
+    let e = rgbe[3] as i64 + stops as i64;
+    if (1..=255).contains(&e) {
+        Some([rgbe[0], rgbe[1], rgbe[2], e as u8])
+    } else {
+        None
+    }
+}
+
 /// Decode one shared-exponent pixel. The output array is `[R, G, B]`
 /// in the source colour space (RGB for `32-bit_rle_rgbe` files, CIE
 /// XYZ for `32-bit_rle_xyze`).
@@ -620,5 +672,122 @@ mod tests {
         let black = rgb_to_rgbe([0.0, 0.0, 0.0]);
         assert_eq!(black, [0, 0, 0, 0]);
         assert_eq!(rgbe_unbiased_exponent(black), None);
+    }
+
+    #[test]
+    fn shift_exponent_zero_stops_is_identity() {
+        // A zero-stop shift returns every quad — including the sentinel
+        // and the exponent-range extremes — unchanged.
+        for q in [
+            [0, 0, 0, 0],
+            [7, 11, 200, 0],
+            [128, 64, 32, 129],
+            [255, 255, 255, 255],
+            [1, 2, 3, 1],
+        ] {
+            assert_eq!(rgbe_shift_exponent(q, 0), Some(q));
+        }
+    }
+
+    #[test]
+    fn shift_exponent_sentinel_passes_through_verbatim() {
+        // Exponent byte 0 is the "no value" sentinel (spec §3): the quad
+        // decodes to black regardless of mantissas, and black scaled by
+        // any power of two is still black. The mantissa bytes are
+        // preserved, not canonicalised.
+        for stops in [-300, -8, -1, 1, 8, 300] {
+            assert_eq!(
+                rgbe_shift_exponent([9, 250, 3, 0], stops),
+                Some([9, 250, 3, 0])
+            );
+            assert_eq!(rgbe_shift_exponent([0, 0, 0, 0], stops), Some([0, 0, 0, 0]));
+        }
+    }
+
+    #[test]
+    fn shift_exponent_out_of_range_returns_none() {
+        // Any shift that would leave the valid 1..=255 exponent-byte
+        // range is unrepresentable.
+        assert_eq!(rgbe_shift_exponent([128, 64, 32, 255], 1), None);
+        assert_eq!(rgbe_shift_exponent([128, 64, 32, 1], -1), None);
+        assert_eq!(rgbe_shift_exponent([128, 64, 32, 250], 10), None);
+        assert_eq!(rgbe_shift_exponent([128, 64, 32, 10], -100), None);
+        // i32 extremes must not overflow the internal arithmetic.
+        assert_eq!(rgbe_shift_exponent([128, 64, 32, 128], i32::MAX), None);
+        assert_eq!(rgbe_shift_exponent([128, 64, 32, 128], i32::MIN), None);
+        // …while the exact boundary shifts still land.
+        assert_eq!(
+            rgbe_shift_exponent([128, 64, 32, 250], 5),
+            Some([128, 64, 32, 255])
+        );
+        assert_eq!(
+            rgbe_shift_exponent([128, 64, 32, 10], -9),
+            Some([128, 64, 32, 1])
+        );
+    }
+
+    #[test]
+    fn shift_exponent_matches_float_scaling_exhaustively() {
+        // For every non-sentinel exponent byte, several mantissa shapes
+        // and a spread of stops: decode(shift(q, n)) must equal
+        // decode(q) * 2^n bit-for-bit whenever the shift is
+        // representable, and be None exactly when the shifted byte
+        // leaves 1..=255.
+        for e in 1..=255u8 {
+            for m in [[128, 64, 32], [255, 255, 255], [1, 2, 3], [0, 200, 0]] {
+                let q = [m[0], m[1], m[2], e];
+                for stops in [-135i32, -7, -1, 1, 7, 120] {
+                    let shifted = rgbe_shift_exponent(q, stops);
+                    let new_e = e as i32 + stops;
+                    if (1..=255).contains(&new_e) {
+                        let s = shifted.expect("in-range shift must be Some");
+                        assert_eq!(&s[..3], &q[..3], "mantissas untouched");
+                        assert_eq!(s[3] as i32, new_e);
+                        // Scale in f64 — 2^±135 is outside the f32
+                        // normal range, but every decoded RGBE value and
+                        // every in-range shifted result is exact in f64.
+                        let scale = 2.0_f64.powi(stops);
+                        let base = rgbe_to_rgb(q);
+                        let got = rgbe_to_rgb(s);
+                        for i in 0..3 {
+                            assert_eq!(
+                                got[i].to_bits(),
+                                ((base[i] as f64 * scale) as f32).to_bits(),
+                                "e={e} m={m:?} stops={stops} ch={i}"
+                            );
+                        }
+                    } else {
+                        assert_eq!(shifted, None, "e={e} stops={stops}");
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn shift_exponent_agrees_with_image_level_stop_adjustment() {
+        // The quad-level shift and the float-domain
+        // HdrImage::adjust_exposure_stops describe the same operation:
+        // shifting every quad by n equals adjusting the decoded image by
+        // n stops and re-encoding, byte-for-byte, on normalised quads
+        // (dominant mantissa >= 128, magnitude above the black floor).
+        let quads: Vec<[u8; 4]> = vec![
+            [128, 64, 32, 129],
+            [255, 0, 7, 140],
+            [200, 128, 255, 100],
+            [128, 128, 128, 136],
+        ];
+        let n = 5;
+        let mut img = crate::HdrImage::from_rgbe_quads(4, 1, &quads, crate::HdrHeader::default());
+        assert!(img.adjust_exposure_stops(n));
+        let reencoded = img.to_rgbe_quads();
+        for (q, r) in quads.iter().zip(reencoded.iter()) {
+            let shifted = rgbe_shift_exponent(*q, n).expect("in-range");
+            assert_eq!(&shifted, r, "quad {q:?}");
+        }
+        // The image-level helper also recorded the 2^5 multiplier so the
+        // scene-referred radiance is unchanged; the quad-level shift is
+        // the raw scale with no header bookkeeping.
+        assert_eq!(img.header.exposure, Some(32.0));
     }
 }

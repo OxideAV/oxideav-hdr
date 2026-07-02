@@ -9,6 +9,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Other
 
+- round 383 (exposure subsystem, cont. — wire-level exponent shift):
+  new `pub fn rgbe_shift_exponent(rgbe: [u8; 4], stops: i32) ->
+  Option<[u8; 4]>` on the `rgbe` module (re-exported at the crate
+  root) — an exact `×2^stops` scale performed entirely on the on-disk
+  quad. The spec-§3 shared-exponent layout
+  (`docs/image/hdr/radiance-hdr-rgbe-format.md`: each channel decodes
+  as `mantissa * 2^(e-136)`) makes a power-of-two scale a pure
+  exponent-byte add: mantissas — and therefore chromaticity — are
+  untouched, and no `f32` quantisation round-trip occurs, so a
+  whole-file exposure shift can run losslessly on the raw
+  `to_rgbe_quads` stream. Sentinel quads (exponent byte `0`, the §3
+  "no value" marker) pass through verbatim (black × 2ⁿ = black,
+  mantissas preserved rather than canonicalised); a shifted exponent
+  outside the valid `1..=255` range is unrepresentable and returns
+  `None` (the caller picks saturate / flush / fail); an i32-extreme
+  `stops` cannot overflow (i64 internal add). Five new tests pin the
+  zero-stop identity, the sentinel pass-through, the range boundary
+  (including `i32::MAX`/`MIN` stops and the exact byte-255/byte-1
+  landings), an exhaustive every-exponent × mantissa-shapes × stops
+  sweep proving `decode(shift(q, n))` equals `decode(q)` scaled by
+  `2^n` bit-for-bit (f64-carried scale; every decoded output exact
+  down into the subnormal byte-`1..=8` scales), and byte-for-byte
+  agreement with the image-level `adjust_exposure_stops` +
+  `to_rgbe_quads` composition on normalised quads
 - round 383 (exposure subsystem — record-consistent exposure
   adjustment): two new `HdrImage` helpers, `adjust_exposure_factor(f32)
   -> bool` and `adjust_exposure_stops(i32) -> bool`. Per the staged

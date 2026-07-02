@@ -61,7 +61,8 @@ pub use header::{AxisSign, GeometricOp, HdrFormat, HdrHeader, Orientation, Prima
 pub use image::{HdrImage, HdrPixelFormat};
 pub use limits::HdrLimits;
 pub use rgbe::{
-    rgb_to_rgbe, rgbe_channel_scale, rgbe_is_zero_pixel, rgbe_to_rgb, rgbe_unbiased_exponent,
+    rgb_to_rgbe, rgbe_channel_scale, rgbe_is_zero_pixel, rgbe_shift_exponent, rgbe_to_rgb,
+    rgbe_unbiased_exponent,
 };
 pub use rle::FallbackMode;
 pub use tonemap::{tone_map, ToneMap};
