@@ -274,3 +274,90 @@ fn flat_4x2_uncompressed_decode_and_reencode() {
         "re-encoded bytes drifted from flat_4x2_uncompressed.hdr",
     );
 }
+
+#[test]
+fn xyze_24x10_newrle_decode_luminance_and_reencode() {
+    // -----------------------------------------------------------------
+    // Fixture 5: `xyze_24x10_newrle.hdr`
+    //
+    // Round 383: the first committed `FORMAT=32-bit_rle_xyze` fixture.
+    // Besides pinning the XYZE wire round-trip, it anchors the
+    // spec-conformance fix to the XYZE luminance semantics: per the
+    // staged spec's §"Physical interpretation" the Y primary of an
+    // XYZE file is *already* lumens/sr/m², so `luminance_buffer` must
+    // return the stored Y verbatim (no 179× efficacy factor) and the
+    // scene-referred luminance divides only the EXPOSURE record out.
+    // -----------------------------------------------------------------
+    let bytes = read_fixture("xyze_24x10_newrle.hdr");
+    let img = parse_hdr(&bytes).expect("parse xyze new-RLE fixture");
+
+    assert_eq!(img.width, 24);
+    assert_eq!(img.height, 10);
+    assert_eq!(img.pixel_format, HdrPixelFormat::Rgb96f);
+    assert_eq!(img.pixels.len(), 24 * 10 * 3);
+
+    // Typed slots: XYZE format, EXPOSURE=2, reference-manual PRIMARIES.
+    assert!(matches!(img.header.format, HdrFormat::Xyze));
+    assert_eq!(img.header.exposure, Some(2.0));
+    let p = img.header.primaries.expect("PRIMARIES missing");
+    assert!((p.red.0 - 0.640).abs() < 1e-4);
+    assert!((p.white.0 - 1.0 / 3.0).abs() < 1e-3);
+
+    // XYZE luminance is the stored Y channel *verbatim* — for every
+    // pixel, bit-for-bit, with no 179× factor.
+    let lum = img.luminance_buffer();
+    assert_eq!(lum.len(), 24 * 10);
+    for (i, px) in img.pixels.chunks_exact(3).enumerate() {
+        assert_eq!(
+            lum[i].to_bits(),
+            px[1].to_bits(),
+            "pixel {i}: luminance {} != stored Y {}",
+            lum[i],
+            px[1]
+        );
+    }
+
+    // Scene-referred luminance divides the EXPOSURE=2 record back out:
+    // exactly half the stored Y (2^-1 is an exact f32 scale).
+    let scene = img.scene_referred_luminance_buffer();
+    for (i, px) in img.pixels.chunks_exact(3).enumerate() {
+        assert_eq!(
+            scene[i].to_bits(),
+            (px[1] * 0.5).to_bits(),
+            "pixel {i}: scene luminance {} != Y/2 {}",
+            scene[i],
+            px[1] * 0.5
+        );
+    }
+
+    // The construction keeps chromaticity constant (X = 0.9·Y,
+    // Z = 1.2·Y): spot-check the ratios within shared-exponent
+    // quantisation noise, and the ~4-decade Y ramp's extremes.
+    let y0 = img.pixels[1];
+    let last = img.pixels.len() - 3;
+    let y_last = img.pixels[last + 1];
+    assert!(y0 > 0.04 && y0 < 0.06, "top-left Y = {y0}");
+    assert!(
+        y_last > 100.0 && y_last < 1000.0,
+        "bottom-right Y = {y_last}"
+    );
+    for px in img.pixels.chunks_exact(3) {
+        assert!(
+            (px[0] / px[1] - 0.9).abs() < 0.02,
+            "X/Y = {}",
+            px[0] / px[1]
+        );
+        assert!(
+            (px[2] / px[1] - 1.2).abs() < 0.02,
+            "Z/Y = {}",
+            px[2] / px[1]
+        );
+    }
+
+    // Byte-stable against the committed fixture.
+    let reencoded = encode_hdr(&img).expect("re-encode xyze new-RLE");
+    assert_eq!(
+        reencoded, bytes,
+        "re-encoded bytes drifted from xyze_24x10_newrle.hdr",
+    );
+}

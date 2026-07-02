@@ -15,8 +15,8 @@
 use std::path::PathBuf;
 
 use oxideav_hdr::{
-    encode_hdr, encode_hdr_with_options, encode_hdr_with_rle, AxisSign, HdrHeader, HdrImage,
-    HdrPixelFormat, LineEnding, Primaries, RleMode,
+    encode_hdr, encode_hdr_with_options, encode_hdr_with_rle, AxisSign, HdrFormat, HdrHeader,
+    HdrImage, HdrPixelFormat, LineEnding, Primaries, RleMode,
 };
 
 /// Deterministic 32×16 RGB gradient — same construction as the
@@ -218,5 +218,43 @@ fn main() {
         .expect("encode flat 4x2 uncompressed fixture");
     let path = fixtures_dir.join("flat_4x2_uncompressed.hdr");
     std::fs::write(&path, &bytes).expect("write flat uncompressed fixture");
+    eprintln!("wrote {} ({} bytes)", path.display(), bytes.len());
+
+    // -----------------------------------------------------------------
+    // Fixture 5 — xyze_24x10_newrle.hdr
+    //
+    // `FORMAT=32-bit_rle_xyze` picture (the four RGBE fixtures above
+    // all carry the default RGBE format) with an `EXPOSURE=` record and
+    // the reference-manual default `PRIMARIES=`. The stored channels
+    // are CIE XYZ on the photometric scale — the Y channel is
+    // lumens/sr/m² per the staged spec's §"Physical interpretation" —
+    // so the matching test can pin the XYZE luminance semantics
+    // (luminance == stored Y verbatim, scene-referred luminance ==
+    // Y / EXPOSURE) against committed on-disk bytes.
+    //
+    // Deterministic construction: Y ramps over ~4 decades across the
+    // diagonal; X and Z track it at fixed 0.9 / 1.2 ratios so the
+    // chromaticity is constant and every channel exercises the shared
+    // exponent.
+    // -----------------------------------------------------------------
+    let (w, h) = (24_u32, 10_u32);
+    let mut pixels = Vec::with_capacity((w * h * 3) as usize);
+    for y in 0..h {
+        for x in 0..w {
+            let u = x as f32 / w as f32;
+            let v = y as f32 / h as f32;
+            let lum = 0.05_f32 * 10.0_f32.powf(4.0 * (u + v) * 0.5);
+            pixels.push(lum * 0.9); // X
+            pixels.push(lum); // Y
+            pixels.push(lum * 1.2); // Z
+        }
+    }
+    let mut img = HdrImage::new_rgb96f(w, h, pixels);
+    img.header.format = HdrFormat::Xyze;
+    img.header.exposure = Some(2.0);
+    img.header.primaries = Some(Primaries::RADIANCE);
+    let bytes = encode_hdr(&img).expect("encode xyze new-RLE fixture");
+    let path = fixtures_dir.join("xyze_24x10_newrle.hdr");
+    std::fs::write(&path, &bytes).expect("write xyze new-RLE fixture");
     eprintln!("wrote {} ({} bytes)", path.display(), bytes.len());
 }

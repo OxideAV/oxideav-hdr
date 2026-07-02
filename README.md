@@ -92,10 +92,13 @@ an external Radiance-capable image tool when one is present on `PATH`
 Committed on-disk regression fixtures live under
 [`tests/fixtures/`](tests/fixtures/) (`gradient_32x16_newrle.hdr`,
 `solid_16x8_oldrle.hdr`, `gradient_32x16_crlf_plusY.hdr`,
-`flat_4x2_uncompressed.hdr`). Between them they exercise every typed
-`KEY=VALUE` slot the decoder recognises plus an untyped extra record,
-both `\n` and `\r\n` line endings, the canonical `-Y H +X W` and the
-non-default `+Y H +X W` axis orders, and all three pixel-section
+`flat_4x2_uncompressed.hdr`, `xyze_24x10_newrle.hdr`). Between them
+they exercise every typed `KEY=VALUE` slot the decoder recognises plus
+an untyped extra record, both `\n` and `\r\n` line endings, the
+canonical `-Y H +X W` and the non-default `+Y H +X W` axis orders,
+both `FORMAT`s (the XYZE fixture also anchors the photometric
+luminance semantics — stored `Y` verbatim, scene-referred `Y ÷
+EXPOSURE` — against committed bytes), and all three pixel-section
 encodings the spec enumerates (new-RLE, old-RLE, uncompressed). The
 matching `tests/fixture_decode.rs` integration test decodes each one,
 asserts the recovered structure, and re-encodes it with byte-identity
