@@ -9,6 +9,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Other
 
+- round 383 (spec-conformance — XYZE photometric luminance): fix the
+  `luminance_lm_per_sr_per_m2` XYZE branch (and everything downstream of
+  it: `HdrImage::luminance_buffer`, `scene_referred_luminance_buffer`) to
+  return the stored `Y` channel **verbatim** instead of `179 * Y`. The
+  staged spec (`docs/image/hdr/radiance-hdr-rgbe-format.md`, §"Physical
+  interpretation") is explicit: for `FORMAT=32-bit_rle_xyze` "the Y
+  primary is already lumens/steradian/m², so the 179× luminance
+  conversion is unnecessary" — an XYZE file stores its channels on the
+  photometric scale, and the round-189..382 implementation applied the
+  `WHTEFFICACY = 179` lm/W efficacy factor a second time, overstating
+  every XYZE luminance by 179×. The RGBE branch (spectral radiance in
+  watts/sr/m², where the efficacy factor genuinely performs the
+  radiometric → photometric conversion) is unchanged. The three tests
+  that encoded the old premise (`luminance_xyze_is_179_times_y`,
+  `luminance_buffer_xyze_skips_per_primary_projection`,
+  `scene_referred_luminance_xyze_uses_y_after_recovery`) are rewritten
+  against the spec rule in the same commit, and a new
+  `luminance_xyze_never_applies_whtefficacy` regression guard pins the
+  verbatim pass-through (plus the RGBE branch keeping its 179×)
 - round 378 (depth — old-RLE decode robustness): reject a leading
   run-length *sentinel* `(1, 1, 1, n)` that appears with **no previous
   pixel established** (the first scanline of the picture, or any old-RLE

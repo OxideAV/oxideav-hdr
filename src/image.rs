@@ -300,9 +300,11 @@ mod tests {
         let mut img = HdrImage::new_rgb96f(2, 1, pixels);
         img.header.format = HdrFormat::Xyze;
         let lum = img.luminance_buffer();
-        // XYZE: luminance is 179 * Y exactly.
-        assert!((lum[0] - 179.0 * 0.5).abs() < 1e-2);
-        assert!((lum[1] - 179.0 * 1.0).abs() < 1e-2);
+        // XYZE: luminance is the stored Y verbatim — per the staged
+        // spec's §"Physical interpretation" the Y primary is already
+        // lumens/sr/m², so no 179× efficacy factor is applied.
+        assert!((lum[0] - 0.5).abs() < 1e-6);
+        assert!((lum[1] - 1.0).abs() < 1e-6);
     }
 
     #[test]
@@ -366,7 +368,8 @@ mod tests {
     #[test]
     fn scene_referred_luminance_xyze_uses_y_after_recovery() {
         use crate::HdrFormat;
-        // XYZE: luminance is 179 * Y of the recovered channels. COLORCORR
+        // XYZE: luminance is the recovered Y verbatim (no 179× — the
+        // stored Y is already photometric per the staged spec). COLORCORR
         // applies to the three stored channels (X,Y,Z) in order, matching
         // `recover_original_colorcorr`.
         let pixels = vec![0.2, 2.0, 0.6]; // Y stored = 2.0
@@ -375,8 +378,8 @@ mod tests {
         img.header.exposure = Some(2.0);
         img.header.colorcorr = Some([1.0, 4.0, 1.0]);
         let scene = img.scene_referred_luminance_buffer();
-        // recovered Y = 2.0 / 2.0 / 4.0 = 0.25 ⇒ 179 * 0.25 = 44.75.
-        assert!((scene[0] - 179.0 * 0.25).abs() < 1e-2, "{}", scene[0]);
+        // recovered Y = 2.0 / 2.0 / 4.0 = 0.25.
+        assert!((scene[0] - 0.25).abs() < 1e-6, "{}", scene[0]);
     }
 
     #[test]
@@ -1346,16 +1349,20 @@ impl HdrImage {
 
     /// Allocate a fresh `width * height` buffer of per-pixel photometric
     /// luminance values, in lumens per steradian per m², computed from
-    /// the picture's float channels per the Radiance reference-manual
-    /// formula:
+    /// the picture's float channels per the staged spec's §"Physical
+    /// interpretation" (`docs/image/hdr/radiance-hdr-rgbe-format.md`):
     ///
     /// ```text
     /// FORMAT=32-bit_rle_rgbe -> 179 * (0.265*R + 0.670*G + 0.065*B)
-    /// FORMAT=32-bit_rle_xyze -> 179 * Y
+    /// FORMAT=32-bit_rle_xyze -> Y
     /// ```
     ///
-    /// The reduction is the same one Radiance's `luminance(col)` macro
-    /// produces. `header.format` selects which branch is applied so the
+    /// RGBE primaries carry spectral radiance in watts/sr/m², so the
+    /// `WHTEFFICACY = 179` lm/W factor performs the radiometric →
+    /// photometric conversion; for XYZE the spec is explicit that "the Y
+    /// primary is already lumens/steradian/m², so the 179× luminance
+    /// conversion is unnecessary" — the Y channel is returned verbatim.
+    /// `header.format` selects which branch is applied so the
     /// caller doesn't have to track it explicitly. Out-of-gamut samples
     /// (`R<0`, `G<0`, `B<0`) are passed through linearly — the formula
     /// is `Σ a_i * c_i` and inherits whatever sign the input has.
@@ -1704,8 +1711,10 @@ impl HdrImage {
     ///    the entire stack.
     /// 2. §"Physical interpretation": the photometric luminance of a
     ///    scene-referred radiance pixel is `179 * (0.265 R + 0.670 G +
-    ///    0.065 B)` for `FORMAT=32-bit_rle_rgbe` and `179 * Y` for
-    ///    `FORMAT=32-bit_rle_xyze`.
+    ///    0.065 B)` for `FORMAT=32-bit_rle_rgbe`, and the stored `Y`
+    ///    verbatim for `FORMAT=32-bit_rle_xyze` (the spec's "the Y
+    ///    primary is already lumens/steradian/m², so the 179× luminance
+    ///    conversion is unnecessary").
     ///
     /// Where [`Self::luminance_buffer`] applies the §"Physical
     /// interpretation" formula to the stored float samples verbatim (the

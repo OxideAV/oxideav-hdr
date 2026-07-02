@@ -30,23 +30,26 @@
 //!
 //! ## Photometric luminance
 //!
-//! The Radiance reference manual section "Physical interpretation" defines
-//! a fixed photometric conversion that turns a `32-bit_rle_rgbe` pixel
-//! into lumens / steradian / m²:
+//! The staged spec's §"Physical interpretation"
+//! (`docs/image/hdr/radiance-hdr-rgbe-format.md`) defines a fixed
+//! photometric conversion per `FORMAT`:
 //!
 //! ```text
 //! luminance = 179 * (0.265*R + 0.670*G + 0.065*B)        (for FORMAT=32-bit_rle_rgbe)
-//! luminance = 179 * Y                                    (for FORMAT=32-bit_rle_xyze)
+//! luminance = Y                                          (for FORMAT=32-bit_rle_xyze)
 //! ```
 //!
 //! 179 lumens/watt is Radiance's `WHTEFFICACY` — the standard luminous
-//! efficacy of equal-energy white. The three RGBE coefficients are the
-//! photopic weights of Greg Ward's reference RGB primaries onto CIE Y.
-//! XYZE files don't need the 0.265/0.670/0.065 step because their Y
-//! channel is already CIE Y; the 179× factor is the only remaining
-//! radiance → photometric conversion. See [`luminance_lm_per_sr_per_m2`]
-//! for the per-pixel helper and [`crate::HdrImage::luminance_buffer`]
-//! for the whole-image variant.
+//! efficacy of equal-energy white. RGBE primaries carry spectral
+//! radiance (watts/sr/m²; pixel `(1,1,1)` ⇒ 1 W/sr/m² over the visible
+//! spectrum), so the efficacy factor converts to lumens; the three
+//! coefficients are the photopic weights of the reference Radiance RGB
+//! primaries onto CIE Y. For XYZE files the spec is explicit that "the
+//! Y primary is already lumens/steradian/m², so the 179× luminance
+//! conversion is unnecessary" — the stored channels are on the
+//! photometric scale and luminance is the Y channel verbatim. See
+//! [`luminance_lm_per_sr_per_m2`] for the per-pixel helper and
+//! [`crate::HdrImage::luminance_buffer`] for the whole-image variant.
 
 /// Identifier for one of the supported RGB working spaces.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -263,12 +266,21 @@ pub const RGBE_BRIGHT_COEFFS: [f32; 3] = [0.265, 0.670, 0.065];
 /// scene-referred pixel from a Radiance picture.
 ///
 /// `format` selects which of the two photometric reductions documented
-/// in the Radiance reference manual is applied:
+/// in the staged spec's §"Physical interpretation"
+/// (`docs/image/hdr/radiance-hdr-rgbe-format.md`) is applied:
 ///
 /// * [`crate::HdrFormat::Rgbe`] — the per-primary projection
-///   `179 * (0.265*R + 0.670*G + 0.065*B)`.
-/// * [`crate::HdrFormat::Xyze`] — pass-through `179 * Y` because the
-///   Y channel of an XYZE file is already CIE Y.
+///   `179 * (0.265*R + 0.670*G + 0.065*B)`. Each RGBE primary is
+///   spectral radiance in watts/sr/m² over its waveband, so the
+///   `WHTEFFICACY = 179` lm/W factor performs the radiometric →
+///   photometric conversion.
+/// * [`crate::HdrFormat::Xyze`] — pass-through `Y`. Per the staged
+///   spec, "the Y primary is already lumens/steradian/m², so the 179×
+///   luminance conversion is unnecessary" — an XYZE file stores its
+///   channels on the photometric scale, and applying the efficacy
+///   factor a second time would overstate the luminance by 179×.
+///   (Rounds 189–381 multiplied this branch by 179; fixed to the
+///   spec-documented pass-through in round 383.)
 ///
 /// Negative inputs (out-of-gamut samples) are returned as-is; callers
 /// that need a clamped photometric value should `max(0.0)` after the
@@ -282,7 +294,7 @@ pub fn luminance_lm_per_sr_per_m2(pixel: [f32; 3], format: crate::HdrFormat) -> 
                     + RGBE_BRIGHT_COEFFS[1] * pixel[1]
                     + RGBE_BRIGHT_COEFFS[2] * pixel[2])
         }
-        crate::HdrFormat::Xyze => WHTEFFICACY * pixel[1],
+        crate::HdrFormat::Xyze => pixel[1],
     }
 }
 
@@ -492,14 +504,29 @@ mod tests {
     }
 
     #[test]
-    fn luminance_xyze_is_179_times_y() {
-        // XYZE files: the Y primary is already lumens/sr/m²; the only
-        // remaining conversion is the 179× scale.
+    fn luminance_xyze_is_y_passthrough() {
+        // XYZE files: per the staged spec's §"Physical interpretation",
+        // "the Y primary is already lumens/steradian/m², so the 179×
+        // luminance conversion is unnecessary" — luminance is the stored
+        // Y channel verbatim, with no efficacy factor.
         let y = luminance_lm_per_sr_per_m2([0.1, 1.0, 0.2], crate::HdrFormat::Xyze);
-        assert!((y - 179.0).abs() < 1e-3, "expected 179, got {y}");
+        assert!((y - 1.0).abs() < 1e-6, "expected 1.0, got {y}");
         // Doubling Y doubles the luminance; X and Z are ignored.
         let y2 = luminance_lm_per_sr_per_m2([5.0, 2.0, 5.0], crate::HdrFormat::Xyze);
-        assert!((y2 - 358.0).abs() < 1e-3, "expected 358, got {y2}");
+        assert!((y2 - 2.0).abs() < 1e-6, "expected 2.0, got {y2}");
+    }
+
+    #[test]
+    fn luminance_xyze_never_applies_whtefficacy() {
+        // Regression guard for the round-383 spec-conformance fix: the
+        // XYZE branch must not multiply by WHTEFFICACY. A stored Y of
+        // 1 lm/sr/m² reports exactly 1 lm/sr/m², not 179.
+        let y = luminance_lm_per_sr_per_m2([0.0, 1.0, 0.0], crate::HdrFormat::Xyze);
+        assert_eq!(y, 1.0, "XYZE luminance must be the Y channel verbatim");
+        // The RGBE branch is the only place the efficacy factor applies:
+        // an equal-energy white of 1 W/sr/m² per primary is 179 lm/sr/m².
+        let w = luminance_lm_per_sr_per_m2([1.0, 1.0, 1.0], crate::HdrFormat::Rgbe);
+        assert!((w - WHTEFFICACY).abs() < 1e-3, "RGBE keeps the 179×: {w}");
     }
 
     #[test]
