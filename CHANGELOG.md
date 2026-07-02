@@ -9,6 +9,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Other
 
+- round 383 (exposure subsystem — record-consistent exposure
+  adjustment): two new `HdrImage` helpers, `adjust_exposure_factor(f32)
+  -> bool` and `adjust_exposure_stops(i32) -> bool`. Per the staged
+  spec §1, `EXPOSURE=` is a "single float multiplier already applied to
+  all pixels", cumulative, with recovery defined as division by the
+  product of all settings — so brightening/dimming a picture while
+  keeping it physically meaningful requires *two* writes: scale the
+  stored channels AND fold the same factor into the header slot. The
+  existing helpers only move in other directions (`apply_exposure`
+  bakes the already-recorded factor in, `recover_original_radiance`
+  divides it out); through round 382 a caller adjusting brightness had
+  to do the two-step dance manually or silently break the recovery
+  contract. `adjust_exposure_factor` performs both atomically
+  (`pixels *= f`; `exposure = Some(effective_exposure() * f)`), leaving
+  `scene_referred_radiance_buffer` / `recover_*` invariant.
+  `adjust_exposure_stops` is the `2^stops` power-of-two form the format
+  note's skeletal converter documents as its integer-stop (`-e
+  +/-stops`) brightness option; since a `2^n` multiply only moves the
+  `f32` exponent field, `+n` then `-n` restores every sample
+  bit-for-bit (pinned by a `to_bits` equality test). Degenerate factors
+  (`0`, negative, non-finite — including `2^|stops| > f32::MAX`) are
+  rejected as `false` with the picture untouched; an exact `1.0` /
+  `stops = 0` is a successful no-op that doesn't materialise an
+  explicit `EXPOSURE=1` record. Six new tests cover recording +
+  seeding-from-default, cumulative stacking with an existing record,
+  scene-referred-radiance invariance, the bit-exact stop round-trip,
+  degenerate rejection, and the unit no-op
 - round 383 (XYZE photometric semantics, cont. — file-faithful format
   converters): six new `xyz` helpers,
   `convert_image_rgb_to_xyz_photometric` /

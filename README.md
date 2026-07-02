@@ -51,6 +51,7 @@ No external library source consulted.
 | CRLF line endings            |  Y   |   Y (`LineEnding::Crlf`) |
 | Decoder resource limits (`HdrLimits`) | Y (default 32 767 × 32 767, ≤ 256 MiB pixel buffer, `parse_hdr_with_limits` / `parse_hdr_with_options_and_limits` for custom) | n/a |
 | `HdrImage::apply_exposure`   |  decode helper |  n/a |
+| `HdrImage::adjust_exposure_factor` / `adjust_exposure_stops` (writer-side exposure adjustment that keeps the picture physically meaningful: multiplies the stored channels **and** folds the same factor into the `EXPOSURE=` slot per spec §1's cumulative already-applied-multiplier rule, so `scene_referred_radiance_buffer` / the `recover_*` helpers are invariant; the `2^stops` form matches the format note's integer-stop (`-e +/-stops`) brightness adjustment and is bit-exact reversible — `+n` then `-n` restores every `f32` sample; degenerate `0`/negative/non-finite factors rejected with the picture untouched) | helper | helper |
 | `HdrImage::apply_colorcorr`  |  decode helper |  n/a |
 | `HdrImage::recover_original_radiance` (spec-canonical undo of `EXPOSURE=` — divides the buffer by the cumulative factor to reconstruct scene-referred radiance, per the staged spec's "divide file values by the product of all EXPOSURE settings" rule) | decode helper | n/a |
 | `HdrImage::recover_original_colorcorr` (per-channel reciprocal of `apply_colorcorr` — reconstructs pre-correction radiance for files that carry `COLORCORR=`) | decode helper | n/a |

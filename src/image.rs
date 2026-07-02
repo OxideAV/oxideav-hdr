@@ -261,6 +261,93 @@ mod tests {
     }
 
     #[test]
+    fn adjust_exposure_factor_scales_pixels_and_records_multiplier() {
+        // No prior record: the slot seeds from the spec default 1.0 and
+        // becomes Some(factor); pixels are multiplied by the factor.
+        let mut img = HdrImage::new_rgb96f(1, 1, vec![1.0, 0.5, 0.25]);
+        assert!(img.adjust_exposure_factor(4.0));
+        assert_eq!(img.header.exposure, Some(4.0));
+        assert!((img.pixels[0] - 4.0).abs() < 1e-6);
+        assert!((img.pixels[1] - 2.0).abs() < 1e-6);
+        assert!((img.pixels[2] - 1.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn adjust_exposure_factor_stacks_with_existing_record() {
+        // EXPOSURE is cumulative per spec §1: an existing record folds
+        // multiplicatively with the new factor.
+        let mut img = HdrImage::new_rgb96f(1, 1, vec![1.0, 1.0, 1.0]);
+        img.header.exposure = Some(3.0);
+        assert!(img.adjust_exposure_factor(2.0));
+        assert_eq!(img.header.exposure, Some(6.0));
+        assert!((img.pixels[0] - 2.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn adjust_exposure_preserves_scene_referred_radiance() {
+        // The whole point of recording the multiplier: the recovered
+        // scene radiance is invariant across the adjustment.
+        let mut img = HdrImage::new_rgb96f(1, 1, vec![0.5, 0.25, 0.125]);
+        img.header.exposure = Some(2.0);
+        let before = img.scene_referred_radiance_buffer();
+        assert!(img.adjust_exposure_stops(3));
+        let after = img.scene_referred_radiance_buffer();
+        for (b, a) in before.iter().zip(after.iter()) {
+            assert!((b - a).abs() < 1e-6, "{b} vs {a}");
+        }
+        // And recover_original_radiance lands on the same values.
+        img.recover_original_radiance();
+        for (b, a) in before.iter().zip(img.pixels.iter()) {
+            assert!((b - a).abs() < 1e-6, "{b} vs {a}");
+        }
+    }
+
+    #[test]
+    fn adjust_exposure_stops_round_trip_is_bit_exact() {
+        // 2^n multiplication only moves the f32 exponent field, so
+        // +n then -n restores every sample bit-for-bit.
+        let original = vec![0.3_f32, 1.7, 0.001, 250.0, 5e-20, 3e18];
+        let mut img = HdrImage::new_rgb96f(2, 1, original.clone());
+        assert!(img.adjust_exposure_stops(5));
+        assert!(img.adjust_exposure_stops(-5));
+        for (o, p) in original.iter().zip(img.pixels.iter()) {
+            assert_eq!(o.to_bits(), p.to_bits(), "{o} vs {p}");
+        }
+        // The two stop records fold to exactly 1.0 (2^5 * 2^-5).
+        assert_eq!(img.header.exposure, Some(1.0));
+    }
+
+    #[test]
+    fn adjust_exposure_rejects_degenerate_factors() {
+        let original = vec![1.0_f32, 0.5, 0.25];
+        let mut img = HdrImage::new_rgb96f(1, 1, original.clone());
+        for bad in [0.0_f32, -2.0, f32::NAN, f32::INFINITY] {
+            assert!(!img.adjust_exposure_factor(bad), "{bad} must be rejected");
+        }
+        // 2^stops overflows / underflows f32 beyond ~±126 stops.
+        assert!(!img.adjust_exposure_stops(1000));
+        assert!(!img.adjust_exposure_stops(-1000));
+        assert_eq!(img.pixels, original);
+        assert!(img.header.exposure.is_none());
+    }
+
+    #[test]
+    fn adjust_exposure_unit_factor_and_zero_stops_are_no_ops() {
+        // factor 1.0 / stops 0 succeed but do not materialise an
+        // explicit EXPOSURE=1 record or touch the pixels.
+        let original = vec![1.0_f32, 0.5, 0.25];
+        let mut img = HdrImage::new_rgb96f(1, 1, original.clone());
+        assert!(img.adjust_exposure_factor(1.0));
+        assert!(img.adjust_exposure_stops(0));
+        assert_eq!(img.pixels, original);
+        assert!(img.header.exposure.is_none());
+        // With an existing record the slot is equally untouched.
+        img.header.exposure = Some(3.0);
+        assert!(img.adjust_exposure_stops(0));
+        assert_eq!(img.header.exposure, Some(3.0));
+    }
+
+    #[test]
     fn apply_colorcorr_scales_each_channel_independently() {
         let mut img = HdrImage::new_rgb96f(2, 1, vec![1.0, 1.0, 1.0, 0.5, 0.25, 0.10]);
         img.header.colorcorr = Some([2.0, 4.0, 8.0]);
@@ -1563,6 +1650,75 @@ impl HdrImage {
                 }
             }
         }
+    }
+
+    /// Multiply every float channel by `factor` **and record the
+    /// multiplication in the `EXPOSURE=` slot**, keeping the picture's
+    /// scene-referred radiance unchanged.
+    ///
+    /// This is the writer-side counterpart to the §1 recovery rule in
+    /// the staged spec (`docs/image/hdr/radiance-hdr-rgbe-format.md`):
+    /// `EXPOSURE=` is a "single float multiplier already applied to all
+    /// pixels", cumulative, and "to recover original radiances
+    /// (watts/sr/m²) divide file values by the product of all `EXPOSURE`
+    /// settings". Brightening or dimming a picture while *keeping it
+    /// physically meaningful* therefore requires two writes — scale the
+    /// stored channels, and fold the same factor into the header slot so
+    /// the recovery division still lands on the original radiance. This
+    /// helper performs both atomically: `pixels *= factor` and
+    /// `header.exposure = Some(effective_exposure() * factor)` (a `None`
+    /// slot seeds from the spec default `1.0`, becoming
+    /// `Some(factor)`). [`Self::scene_referred_radiance_buffer`] and the
+    /// `recover_*` helpers are invariant across a call.
+    ///
+    /// Contrast with the neighbouring exposure helpers, which move in
+    /// other directions: [`Self::apply_exposure`] multiplies the
+    /// *already-recorded* factor into the pixels (clearing the slot),
+    /// and [`Self::recover_original_radiance`] divides it out. Neither
+    /// changes the displayed brightness *and* keeps the record
+    /// consistent the way this one does.
+    ///
+    /// Returns `true` when the adjustment was applied. A degenerate
+    /// `factor` (`0.0`, negative, or non-finite) is rejected as `false`
+    /// with the picture untouched — a zero or negative multiplier would
+    /// make the recovery division degenerate / flip radiance signs, and
+    /// the permissive `recover_*` handling would then silently discard
+    /// it. An exact `1.0` factor is a full no-op that still returns
+    /// `true` (the slot is left as-is rather than materialising an
+    /// explicit `EXPOSURE=1` record).
+    pub fn adjust_exposure_factor(&mut self, factor: f32) -> bool {
+        if !(factor.is_finite() && factor > 0.0) {
+            return false;
+        }
+        if factor == 1.0 {
+            return true;
+        }
+        for v in &mut self.pixels {
+            *v *= factor;
+        }
+        self.header.exposure = Some(self.effective_exposure() * factor);
+        true
+    }
+
+    /// Adjust the picture's exposure by a whole number of photographic
+    /// *stops* — the `2^stops` power-of-two form of
+    /// [`Self::adjust_exposure_factor`].
+    ///
+    /// The staged format note's skeletal converter documents exposure
+    /// adjustment in exactly this shape (a `-e +/-stops` integer-stop
+    /// brightness option applied to the decoded scanlines), and the
+    /// power-of-two factor has a pleasant numerical property: an `f32`
+    /// multiplication by `2^n` is *exact* (it only moves the exponent
+    /// field), so `adjust_exposure_stops(n)` followed by
+    /// `adjust_exposure_stops(-n)` restores every sample bit-for-bit
+    /// (absent overflow to `∞` / underflow to subnormal-zero at the
+    /// extremes of the `f32` range).
+    ///
+    /// Returns `true` when applied; `false` (picture untouched) when
+    /// `2^stops` is not a finite positive `f32` (|stops| beyond ~±126).
+    /// `stops = 0` is a no-op that returns `true`.
+    pub fn adjust_exposure_stops(&mut self, stops: i32) -> bool {
+        self.adjust_exposure_factor(2.0_f32.powi(stops))
     }
 
     /// Divide each float channel by the header's cumulative `EXPOSURE`
