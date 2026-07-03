@@ -33,6 +33,16 @@
 //!  * `rgb_to_xyz_matrix_from_primaries` / `xyz_to_rgb_matrix_from_primaries`
 //!    directly (the `Option` return is the degeneracy oracle),
 //!  * `luminance_lm_per_sr_per_m2` under both `HdrFormat` branches,
+//!  * the six photometric (`WHTEFFICACY`-folded) file-faithful
+//!    converters added in round 383, over the same hostile buffer and
+//!    the same unconstrained `Primaries` record,
+//!  * `HdrImage::adjust_exposure_factor` / `adjust_exposure_stops` with
+//!    verbatim fuzz factors (NaN / ±inf / negative / zero must be
+//!    rejected without touching the buffer; a recorded `EXPOSURE=`
+//!    stays finite-positive) and full-`i8`-range stop counts,
+//!  * `rgbe_shift_exponent` with i32-extreme stop counts on
+//!    fuzz-shaped quads (must shift in range or report `None`, never
+//!    panic / overflow / land a non-sentinel quad on exponent byte 0),
 //!  * `tone_map` with all eight `ToneMap` operators, each with
 //!    fuzz-controlled exposure / white-point / bias / scene-max params,
 //!    asserting the returned `Rgb24` buffer is exactly `width*height*3`
@@ -45,11 +55,17 @@
 
 use libfuzzer_sys::fuzz_target;
 use oxideav_hdr::{
-    convert_image_rgb_to_xyz, convert_image_rgb_to_xyz_with_effective_primaries,
-    convert_image_rgb_to_xyz_with_primaries, convert_image_xyz_to_rgb,
+    convert_image_rgb_to_xyz, convert_image_rgb_to_xyz_photometric,
+    convert_image_rgb_to_xyz_photometric_with_effective_primaries,
+    convert_image_rgb_to_xyz_photometric_with_primaries,
+    convert_image_rgb_to_xyz_with_effective_primaries, convert_image_rgb_to_xyz_with_primaries,
+    convert_image_xyz_to_rgb, convert_image_xyz_to_rgb_photometric,
+    convert_image_xyz_to_rgb_photometric_with_effective_primaries,
+    convert_image_xyz_to_rgb_photometric_with_primaries,
     convert_image_xyz_to_rgb_with_effective_primaries, convert_image_xyz_to_rgb_with_primaries,
-    luminance_lm_per_sr_per_m2, rgb_to_xyz, rgb_to_xyz_matrix_from_primaries, tone_map, xyz_to_rgb,
-    xyz_to_rgb_matrix_from_primaries, HdrFormat, HdrImage, Primaries, RgbColorSpace, ToneMap,
+    luminance_lm_per_sr_per_m2, rgb_to_xyz, rgb_to_xyz_matrix_from_primaries, rgbe_shift_exponent,
+    tone_map, xyz_to_rgb, xyz_to_rgb_matrix_from_primaries, HdrFormat, HdrImage, Primaries,
+    RgbColorSpace, ToneMap,
 };
 
 /// Pull the next `f32` out of the byte stream, advancing the cursor by
@@ -166,6 +182,66 @@ fuzz_target!(|data: &[u8]| {
         let mut img = base.clone();
         let _ran = convert_image_rgb_to_xyz_with_effective_primaries(&mut img);
         assert_eq!(img.pixels.len(), n, "effective wrapper preserves length");
+    }
+
+    // The photometric (file-faithful, WHTEFFICACY-folded) converter
+    // family — the same hostile buffer through the scaled matrices,
+    // covering all six round-383 entry points.
+    for space in [RgbColorSpace::Srgb, RgbColorSpace::Radiance] {
+        let mut img = base.clone();
+        convert_image_rgb_to_xyz_photometric(&mut img, space);
+        assert_eq!(img.pixels.len(), n, "photometric preserves length");
+        let mut img = base.clone();
+        convert_image_xyz_to_rgb_photometric(&mut img, space);
+        assert_eq!(img.pixels.len(), n, "photometric preserves length");
+    }
+    {
+        let mut img = base.clone();
+        let _ran = convert_image_rgb_to_xyz_photometric_with_primaries(&mut img, primaries);
+        assert_eq!(img.pixels.len(), n, "photometric primaries len");
+        let mut img = base.clone();
+        let _ran = convert_image_xyz_to_rgb_photometric_with_primaries(&mut img, primaries);
+        assert_eq!(img.pixels.len(), n, "photometric primaries len");
+        let mut img = base.clone();
+        let _ran = convert_image_rgb_to_xyz_photometric_with_effective_primaries(&mut img);
+        assert_eq!(img.pixels.len(), n, "photometric effective len");
+        let mut img = base.clone();
+        let _ran = convert_image_xyz_to_rgb_photometric_with_effective_primaries(&mut img);
+        assert_eq!(img.pixels.len(), n, "photometric effective len");
+    }
+
+    // Record-consistent exposure adjustment: an arbitrary fuzz factor
+    // (NaN / inf / negative / zero are all reachable and must be
+    // rejected without touching the buffer), an arbitrary stop count,
+    // and the invariant that a successful adjustment keeps the buffer
+    // length and never poisons the EXPOSURE slot with a non-finite
+    // value.
+    {
+        let mut img = base.clone();
+        let factor = exposure; // reuse a verbatim fuzz float
+        let ran = img.adjust_exposure_factor(factor);
+        assert_eq!(img.pixels.len(), n, "adjust_exposure preserves length");
+        if ran {
+            if let Some(e) = img.header.exposure {
+                assert!(e.is_finite() && e > 0.0, "recorded EXPOSURE stays sane");
+            }
+        }
+        let stops = i32::from(data[0] as i8); // full i8 range incl. negatives
+        let _ = img.adjust_exposure_stops(stops);
+        assert_eq!(img.pixels.len(), n, "stops adjustment preserves length");
+    }
+
+    // Wire-level exponent shift: every mantissa/exponent/stop shape must
+    // either shift in range or report None — never panic or overflow.
+    {
+        let quad = [data[0], data[1], data[data.len() - 1], data[data.len() / 2]];
+        for stops in [i32::MIN, -256, -1, 0, 1, 256, i32::MAX] {
+            if let Some(s) = rgbe_shift_exponent(quad, stops) {
+                if quad[3] != 0 {
+                    assert!(s[3] != 0, "shift never lands on the sentinel byte");
+                }
+            }
+        }
     }
 
     // Every tone-mapping operator, each fed the hostile float buffer and

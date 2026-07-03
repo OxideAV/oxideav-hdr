@@ -690,3 +690,85 @@ fn public_parse_accepts_old_rle_run_spanning_scanline_boundary() {
         );
     }
 }
+
+#[test]
+fn photometric_xyze_pipeline_survives_encode_decode() {
+    // Round 383 end-to-end: an RGBE picture converted with the
+    // file-faithful photometric converter, written as a real XYZE
+    // file, decoded back, and converted to RGBE again keeps its
+    // photometric luminance throughout — the full spec §"Physical
+    // interpretation" contract on the wire, not just in-memory.
+    use oxideav_hdr::{
+        convert_image_rgb_to_xyz_photometric, convert_image_xyz_to_rgb_photometric, RgbColorSpace,
+    };
+
+    let mut img = gradient(16, 8);
+    let lum_before = img.luminance_buffer(); // RGBE branch (179 × weights).
+
+    convert_image_rgb_to_xyz_photometric(&mut img, RgbColorSpace::Radiance);
+    let bytes = encode_hdr(&img).expect("encode XYZE");
+    let decoded = parse_hdr(&bytes).expect("decode XYZE");
+    assert!(matches!(decoded.header.format, HdrFormat::Xyze));
+
+    // Luminance survives the conversion + shared-exponent quantisation:
+    // ~1 % RGBE precision + the 3-decimal rounding of the spec's
+    // photopic weights.
+    let lum_xyze = decoded.luminance_buffer(); // XYZE branch (Y verbatim).
+    for (i, (b, a)) in lum_before.iter().zip(lum_xyze.iter()).enumerate() {
+        assert!(
+            (b - a).abs() < b.abs() * 0.02 + 1e-4,
+            "pixel {i}: RGBE luminance {b} vs on-disk XYZE luminance {a}"
+        );
+    }
+
+    // And back to RGBE — still within the compounded quantisation.
+    let mut back = decoded;
+    convert_image_xyz_to_rgb_photometric(&mut back, RgbColorSpace::Radiance);
+    assert!(matches!(back.header.format, HdrFormat::Rgbe));
+    let lum_back = back.luminance_buffer();
+    for (i, (b, a)) in lum_before.iter().zip(lum_back.iter()).enumerate() {
+        assert!(
+            (b - a).abs() < b.abs() * 0.03 + 1e-4,
+            "pixel {i}: original {b} vs round-tripped {a}"
+        );
+    }
+}
+
+#[test]
+fn stop_adjustment_survives_encode_decode_with_recoverable_radiance() {
+    // Round 383 end-to-end: brightening a picture by +3 stops via
+    // adjust_exposure_stops, writing it out, and decoding it back
+    // yields a file whose EXPOSURE= record lets the reader recover the
+    // original scene radiance — the spec §1 recovery rule holding
+    // across the wire.
+    let img = gradient(16, 8);
+    let scene_before = img.scene_referred_radiance_buffer();
+
+    let mut bright = img;
+    assert!(bright.adjust_exposure_stops(3));
+    let bytes = encode_hdr(&bright).expect("encode adjusted");
+    let decoded = parse_hdr(&bytes).expect("decode adjusted");
+
+    // The EXPOSURE record survived the text round-trip…
+    assert_eq!(decoded.header.exposure, Some(8.0));
+    // …the stored samples really are ~8× the original scene radiance…
+    let lum = decoded.luminance_buffer();
+    let scene_lum = decoded.scene_referred_luminance_buffer();
+    for (i, (l, s)) in lum.iter().zip(scene_lum.iter()).enumerate() {
+        assert!(
+            (l - 8.0 * s).abs() < l.abs() * 1e-3 + 1e-4,
+            "pixel {i}: stored luminance {l} vs 8× scene {s}"
+        );
+    }
+    // …and the recovered radiance matches the pre-adjustment scene
+    // within shared-exponent quantisation. The gradient's B channel is
+    // ¼ of the dominant R, so its truncated mantissa sits near 32 and
+    // one quantisation step is ~1/32 ≈ 3.2 % — 4 % bounds every channel.
+    let scene_after = decoded.scene_referred_radiance_buffer();
+    for (i, (b, a)) in scene_before.iter().zip(scene_after.iter()).enumerate() {
+        assert!(
+            (b - a).abs() < b.abs() * 0.04 + 1e-6,
+            "channel {i}: scene radiance {b} vs recovered {a}"
+        );
+    }
+}

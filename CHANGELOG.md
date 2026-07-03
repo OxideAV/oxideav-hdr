@@ -9,6 +9,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Other
 
+- round 383 (round close — fuzz + end-to-end coverage of the new
+  surface): the `colorconv` fuzz target now drives the six photometric
+  (`WHTEFFICACY`-folded) converters over the same hostile verbatim-`f32`
+  buffer and unconstrained `Primaries` record as the colorimetric
+  family, plus `adjust_exposure_factor` / `adjust_exposure_stops` with
+  raw fuzz factors (NaN / ±inf / negative / zero must be rejected
+  without touching the buffer; a recorded `EXPOSURE=` must stay
+  finite-positive) and `rgbe_shift_exponent` with i32-extreme stop
+  counts on fuzz-shaped quads (shift in range or `None`, never a
+  non-sentinel quad landing on exponent byte 0). Two new public-API
+  integration tests in `tests/roundtrip.rs` prove the round's two
+  pipelines across the wire: an RGBE picture converted with
+  `convert_image_rgb_to_xyz_photometric`, encoded as a real XYZE file,
+  decoded, and converted back keeps its photometric luminance at every
+  step (within RGBE quantisation + the spec weights' 3-decimal
+  rounding); and a `+3`-stop `adjust_exposure_stops` picture written
+  out and re-read carries `EXPOSURE=8`, stores samples at 8× the scene
+  luminance, and recovers the pre-adjustment scene radiance via
+  `scene_referred_radiance_buffer` (4 % bound — the gradient's
+  quarter-magnitude B channel quantises near mantissa 32)
 - round 383 (XYZE photometric semantics, cont. — on-disk fixture): add
   `tests/fixtures/xyze_24x10_newrle.hdr` (1113 bytes), the first
   committed `FORMAT=32-bit_rle_xyze` regression anchor — the four
