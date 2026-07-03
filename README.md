@@ -1,5 +1,7 @@
 # oxideav-hdr
 
+[![CI](https://github.com/OxideAV/oxideav-hdr/actions/workflows/ci.yml/badge.svg)](https://github.com/OxideAV/oxideav-hdr/actions/workflows/ci.yml) [![crates.io](https://img.shields.io/crates/v/oxideav-hdr.svg)](https://crates.io/crates/oxideav-hdr) [![docs.rs](https://docs.rs/oxideav-hdr/badge.svg)](https://docs.rs/oxideav-hdr) [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+
 Pure-Rust Radiance RGBE (`.hdr` / `.pic`) reader + writer for the
 [oxideav](https://github.com/OxideAV/oxideav-workspace) workspace.
 
