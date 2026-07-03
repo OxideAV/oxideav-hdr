@@ -69,11 +69,12 @@ fuzz_target!(|data: &[u8]| {
     }
 
     // --- on-wire option selectors (first 4 bytes) ---
-    let rle = match data[0] % 4 {
+    let rle = match data[0] % 5 {
         0 => RleMode::New,
         1 => RleMode::Old,
         2 => RleMode::Auto,
-        _ => RleMode::Uncompressed,
+        3 => RleMode::Uncompressed,
+        _ => RleMode::Smallest,
     };
     let line_ending = if data[1] & 1 == 0 {
         LineEnding::Lf
@@ -186,9 +187,10 @@ fuzz_target!(|data: &[u8]| {
     // Decode with the fallback matching the encoded flavour. New-RLE
     // carries its own `0x02 0x02 hi lo` marker so the fallback is
     // irrelevant for it and for `Auto`'s new pick; Old / Uncompressed
-    // need their matching fallback because they have no in-band marker.
+    // need their matching fallback because they have no in-band marker,
+    // and Smallest's flat scanlines must be read flat.
     let fallback = match rle {
-        RleMode::Uncompressed => FallbackMode::Uncompressed,
+        RleMode::Uncompressed | RleMode::Smallest => FallbackMode::Uncompressed,
         _ => FallbackMode::OldRle,
     };
 

@@ -9,6 +9,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Other
 
+- round 383 (encoder — content-adaptive smallest-output RLE): new
+  `RleMode::Smallest` encoder flavour that picks **per scanline**
+  whichever of new-RLE and flat/uncompressed is smaller (ties to
+  new-RLE, the unambiguous standard form; widths outside the marker's
+  `8..=32767` range always emit flat and never error). Mixing flavours
+  within one file is spec-sanctioned because the staged spec's reader
+  detection is per-scanline ("A reader detects a non-RLE scanline when
+  the first quad is not `2, 2, !(0x80)` … in which case it falls back
+  to reading the scanline flat"), and the existing decoder already
+  probes each scanline independently. The round-373 `Auto` mode only
+  keys off *width*; on noisy (incompressible) rows new-RLE genuinely
+  costs more than flat — `width + ceil(width/128)` literal-header bytes
+  per channel plus the 4-byte marker — so mixed-content pictures come
+  out smaller than under either pure mode (pinned by a
+  solid-rows/noisy-rows test). A flat scanline emitted by this encoder
+  can never alias the reader's marker probe: the probe requires the
+  first three bytes `< 0x80` while the shared-exponent quantiser always
+  normalises the dominant mantissa into `128..=255` (documented on the
+  variant; a belt-and-braces runtime check + `debug_assert` forces
+  new-RLE anyway if a future quantiser change ever broke the
+  invariant). Pairs with `FallbackMode::Uncompressed` on the read side
+  (flat rows must not be sentinel-scanned). Five new encoder tests pin
+  byte-identity with pure New on compressible content, byte-identity
+  with pure flat on noise (and the size win over New), the
+  never-exceeds-either-pure-mode property, the mixed-file size win +
+  exact decode, and the narrow-width flat path; the bit-exact
+  `tests/rgbe_roundtrip_matrix.rs` matrix, the 256→320-case
+  full-option matrix in `tests/roundtrip.rs`, and the `encode` fuzz
+  target all grow a fifth RLE arm
 - round 383 (round close — fuzz + end-to-end coverage of the new
   surface): the `colorconv` fuzz target now drives the six photometric
   (`WHTEFFICACY`-folded) converters over the same hostile verbatim-`f32`

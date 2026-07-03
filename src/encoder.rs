@@ -137,6 +137,36 @@ pub enum RleMode {
     /// Pair with [`crate::rle::FallbackMode::Uncompressed`] on the read
     /// side via [`crate::decoder::parse_hdr_with_options`].
     Uncompressed,
+    /// Content-adaptive smallest-output heuristic: **per scanline**,
+    /// emit whichever of [`RleMode::New`] and [`RleMode::Uncompressed`]
+    /// is smaller (ties go to new-RLE, the unambiguous standard form).
+    /// Widths outside the new-RLE marker's `8..=32767` addressable
+    /// range always emit flat; never errors.
+    ///
+    /// Mixing the two flavours within one file is valid because the
+    /// staged spec's reader detection is *per scanline*: "A reader
+    /// detects a non-RLE scanline when the first quad is not
+    /// `rgbe[0]==2 && rgbe[1]==2 && !(rgbe[2] & 0x80)`, or when the
+    /// embedded length does not equal the expected width — in which
+    /// case it falls back to reading the scanline flat"
+    /// (`docs/image/hdr/radiance-hdr-rgbe-format.md`, §"Scanline
+    /// flavors"). A flat scanline emitted by this encoder can never
+    /// alias that probe: the probe's first three bytes must all be
+    /// `< 0x80`, while the shared-exponent quantiser always normalises
+    /// the dominant mantissa into `128..=255`, so at least one of the
+    /// first quad's R/G/B bytes has its high bit set (a
+    /// belt-and-braces runtime check forces new-RLE anyway if a future
+    /// quantiser change ever broke the invariant).
+    ///
+    /// New-RLE's worst case per channel is `width + ceil(width/128)`
+    /// literal-block bytes plus the 4-byte marker, so noisy
+    /// (incompressible) scanlines genuinely come out *larger* than the
+    /// flat `4 * width` form — this mode wins on mixed-content
+    /// pictures where some rows compress and others don't. Pair with
+    /// [`crate::rle::FallbackMode::Uncompressed`] on the read side
+    /// (the old-RLE fallback would misread literal `(1, 1, 1, *)`
+    /// quads in the flat rows).
+    Smallest,
 }
 
 #[cfg(feature = "registry")]
@@ -589,6 +619,37 @@ fn write_pixel_rows(
             RleMode::New => encode_scanline(&channels, width, out)?,
             RleMode::Old | RleMode::Auto => encode_scanline_old_rle(&channels, width, out)?,
             RleMode::Uncompressed => encode_scanline_uncompressed(&channels, width, out)?,
+            RleMode::Smallest => {
+                if (8..=32767).contains(&width) {
+                    // Render the new-RLE candidate into a scratch buffer
+                    // and compare against the flat form's fixed size.
+                    let mut scratch = Vec::with_capacity(width * 4 + 8);
+                    encode_scanline(&channels, width, &mut scratch)?;
+                    // A flat scanline whose first quad matched the
+                    // reader's new-RLE probe (bytes `2, 2, <0x80` +
+                    // embedded length == width) would be misread. The
+                    // quantiser makes this unreachable — the dominant
+                    // mantissa is always >= 128 while the probe needs
+                    // all three of the first bytes < 0x80 — but we
+                    // force new-RLE anyway if it ever occurs.
+                    let flat_aliases_marker = channels[0][0] == 0x02
+                        && channels[1][0] == 0x02
+                        && channels[2][0] & 0x80 == 0
+                        && ((channels[2][0] as usize) << 8) | (channels[3][0] as usize) == width;
+                    debug_assert!(
+                        !flat_aliases_marker,
+                        "quantiser output can never alias the new-RLE marker"
+                    );
+                    if scratch.len() <= width * 4 || flat_aliases_marker {
+                        out.extend_from_slice(&scratch);
+                    } else {
+                        encode_scanline_uncompressed(&channels, width, out)?;
+                    }
+                } else {
+                    // New-RLE can't address this width; flat always can.
+                    encode_scanline_uncompressed(&channels, width, out)?;
+                }
+            }
         }
     }
     Ok(())
@@ -1019,5 +1080,120 @@ mod tests {
         assert!(img.header.magic_id.is_none());
         let bytes = encode_hdr_preserving_magic(&img, RleMode::New, LineEnding::Lf).unwrap();
         assert!(bytes.starts_with(b"#?RADIANCE\n"));
+    }
+
+    /// A deterministic incompressible image: every pixel a distinct
+    /// magnitude from a small LCG, so no channel byte repeats often
+    /// enough for the new-RLE repeat codes to win.
+    fn noisy(w: u32, h: u32) -> HdrImage {
+        let mut state = 0x1234_5678_u64;
+        let mut pixels = Vec::with_capacity((w * h * 3) as usize);
+        for _ in 0..(w * h) {
+            for _ in 0..3 {
+                state = state.wrapping_mul(6364136223846793005).wrapping_add(1);
+                let m = ((state >> 33) & 0xFFFF) as f32;
+                pixels.push(0.25 + m / 65536.0);
+            }
+        }
+        HdrImage::new_rgb96f(w, h, pixels)
+    }
+
+    #[test]
+    fn smallest_picks_new_rle_on_compressible_content() {
+        // A solid picture compresses heavily under new-RLE, so the
+        // Smallest output must be byte-identical to the pure New mode.
+        let mut img = pattern(16, 4);
+        for px in img.pixels.iter_mut() {
+            *px = 0.5;
+        }
+        let smallest = encode_hdr_with_rle(&img, RleMode::Smallest).unwrap();
+        let new = encode_hdr_with_rle(&img, RleMode::New).unwrap();
+        assert_eq!(smallest, new);
+    }
+
+    #[test]
+    fn smallest_picks_flat_on_incompressible_content() {
+        // Noise makes each new-RLE channel cost width + ceil(width/128)
+        // literal-header bytes plus the 4-byte marker — larger than the
+        // flat 4*width form — so Smallest must emit the flat scanlines.
+        let img = noisy(32, 4);
+        let smallest = encode_hdr_with_rle(&img, RleMode::Smallest).unwrap();
+        let flat = encode_hdr_with_rle(&img, RleMode::Uncompressed).unwrap();
+        let new = encode_hdr_with_rle(&img, RleMode::New).unwrap();
+        assert_eq!(smallest, flat);
+        assert!(
+            smallest.len() < new.len(),
+            "flat {} must beat new-RLE {} on noise",
+            smallest.len(),
+            new.len()
+        );
+    }
+
+    #[test]
+    fn smallest_never_exceeds_either_pure_mode() {
+        // The per-scanline minimum can only improve on both whole-file
+        // pure modes (header/resolution bytes are identical).
+        for img in [pattern(16, 4), noisy(24, 6), pattern(9, 13), noisy(8, 8)] {
+            let smallest = encode_hdr_with_rle(&img, RleMode::Smallest).unwrap();
+            let new = encode_hdr_with_rle(&img, RleMode::New).unwrap();
+            let flat = encode_hdr_with_rle(&img, RleMode::Uncompressed).unwrap();
+            assert!(smallest.len() <= new.len(), "vs New");
+            assert!(smallest.len() <= flat.len(), "vs Uncompressed");
+        }
+    }
+
+    #[test]
+    fn smallest_mixes_flavours_per_scanline_and_decodes() {
+        // Half the rows solid (new-RLE wins), half noisy (flat wins):
+        // the mixed file must be smaller than either pure mode and must
+        // decode exactly under FallbackMode::Uncompressed — the
+        // spec's per-scanline marker probe handles the mix.
+        let w = 32u32;
+        let solid = {
+            let mut i = pattern(w, 1);
+            for px in i.pixels.iter_mut() {
+                *px = 0.5;
+            }
+            i
+        };
+        let noise = noisy(w, 1);
+        let mut pixels = Vec::new();
+        for row in 0..8 {
+            let src = if row % 2 == 0 { &solid } else { &noise };
+            pixels.extend_from_slice(&src.pixels);
+        }
+        let img = HdrImage::new_rgb96f(w, 8, pixels);
+
+        let smallest = encode_hdr_with_rle(&img, RleMode::Smallest).unwrap();
+        let new = encode_hdr_with_rle(&img, RleMode::New).unwrap();
+        let flat = encode_hdr_with_rle(&img, RleMode::Uncompressed).unwrap();
+        assert!(
+            smallest.len() < new.len() && smallest.len() < flat.len(),
+            "mixed content: smallest {} must beat both pure modes ({} / {})",
+            smallest.len(),
+            new.len(),
+            flat.len()
+        );
+
+        let back = crate::decoder::parse_hdr_with_options(
+            &smallest,
+            crate::rle::FallbackMode::Uncompressed,
+        )
+        .unwrap();
+        assert_eq!(back.width, w);
+        assert_eq!(back.height, 8);
+        for (i, (a, b)) in img.pixels.iter().zip(back.pixels.iter()).enumerate() {
+            assert!((a - b).abs() < a.abs() * 0.02 + 1e-6, "px {i}: {a} vs {b}");
+        }
+    }
+
+    #[test]
+    fn smallest_handles_out_of_range_widths_flat() {
+        // Widths the new-RLE marker can't address (here: 4 < 8) always
+        // emit flat and never error.
+        let img = pattern(4, 3);
+        let smallest = encode_hdr_with_rle(&img, RleMode::Smallest).unwrap();
+        let flat = encode_hdr_with_rle(&img, RleMode::Uncompressed).unwrap();
+        assert_eq!(smallest, flat);
     }
 }

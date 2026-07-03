@@ -89,7 +89,9 @@ fn fallback_for(rle: RleMode) -> FallbackMode {
         // New-RLE carries its own marker; the fallback is never reached,
         // but OldRle is the historical default.
         RleMode::New | RleMode::Auto | RleMode::Old => FallbackMode::OldRle,
-        RleMode::Uncompressed => FallbackMode::Uncompressed,
+        // Smallest mixes new-RLE and flat scanlines — its flat rows
+        // must be read flat, never as old-RLE sentinels.
+        RleMode::Uncompressed | RleMode::Smallest => FallbackMode::Uncompressed,
     }
 }
 
@@ -125,12 +127,14 @@ const ORIENTATIONS: [Orientation; 8] = [
 /// to dodge the run sentinel, so it is *not* byte-exact in general; the
 /// generator never emits `(1, 1, 1)` mantissas (the dominant channel is
 /// always `>= 128`), so Old is byte-exact here too. Auto picks New within
-/// the width window and Old outside it.
-const RLE_MODES: [RleMode; 4] = [
+/// the width window and Old outside it; Smallest picks per scanline
+/// between New and flat (both lossless quad re-packings).
+const RLE_MODES: [RleMode; 5] = [
     RleMode::New,
     RleMode::Old,
     RleMode::Auto,
     RleMode::Uncompressed,
+    RleMode::Smallest,
 ];
 
 #[test]

@@ -481,6 +481,7 @@ fn full_option_matrix_round_trips_typed_header_and_orientation() {
         RleMode::Old,
         RleMode::Auto,
         RleMode::Uncompressed,
+        RleMode::Smallest,
     ];
     let eols = [LineEnding::Lf, LineEnding::Crlf];
     let magics = [MagicLine::Radiance, MagicLine::Rgbe];
@@ -522,7 +523,7 @@ fn full_option_matrix_round_trips_typed_header_and_orientation() {
                             .expect("encode must succeed for in-range dims");
 
                         let fallback = match rle {
-                            RleMode::Uncompressed => FallbackMode::Uncompressed,
+                            RleMode::Uncompressed | RleMode::Smallest => FallbackMode::Uncompressed,
                             _ => FallbackMode::OldRle,
                         };
                         let back = parse_hdr_with_options(&bytes, fallback)
@@ -583,8 +584,8 @@ fn full_option_matrix_round_trips_typed_header_and_orientation() {
             }
         }
     }
-    // 4 RLE × 2 EOL × 2 magic × 8 orientation × 2 format = 256 cases.
-    assert_eq!(cases, 256, "expected the full 256-case matrix");
+    // 5 RLE × 2 EOL × 2 magic × 8 orientation × 2 format = 320 cases.
+    assert_eq!(cases, 320, "expected the full 320-case matrix");
 }
 
 /// Build a minimal valid HDR text container (magic + `FORMAT` + blank
