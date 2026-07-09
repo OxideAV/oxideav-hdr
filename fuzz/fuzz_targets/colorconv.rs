@@ -264,6 +264,11 @@ fuzz_target!(|data: &[u8]| {
             n,
             "linear scene-referred buffer len"
         );
+        assert_eq!(
+            img.linear_scene_referred_luminance_buffer().len(),
+            pixel_count,
+            "linear scene-referred luminance buffer len"
+        );
         img.recover_linear_scene_referred_radiance();
         assert_eq!(img.pixels.len(), n, "recover preserves length");
         assert!(img.header.gamma.is_none() && img.header.exposure.is_none());
