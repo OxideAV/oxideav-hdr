@@ -231,6 +231,60 @@ fuzz_target!(|data: &[u8]| {
         assert_eq!(img.pixels.len(), n, "stops adjustment preserves length");
     }
 
+    // GAMMA= linearisation surface. The transfer exponent is a verbatim
+    // fuzz float, so 0 / negative / NaN / inf (all treated as the identity
+    // no-op) and huge finite exponents (whose power blows up to inf on the
+    // hostile buffer) both reach the per-channel `stored^g`. None of the
+    // helpers may panic, and every one must preserve the buffer length.
+    {
+        // In-place linearisation from a header slot: the slot must always
+        // end cleared, and effective_gamma must report the identity 1.0
+        // once it is.
+        let mut img = base.clone();
+        img.header.gamma = Some(gamma);
+        img.linearize_gamma();
+        assert_eq!(img.pixels.len(), n, "linearize_gamma preserves length");
+        assert!(img.header.gamma.is_none(), "gamma slot cleared");
+        assert!((img.effective_gamma() - 1.0).abs() < f32::EPSILON);
+
+        // Non-mutating buffers: fixed lengths, slot preserved.
+        let mut img = base.clone();
+        img.header.gamma = Some(gamma);
+        assert_eq!(img.linear_radiance_buffer().len(), n, "linear buffer len");
+        assert_eq!(img.header.gamma, Some(gamma), "buffer view preserves slot");
+
+        // Full linearise-then-divide recovery, mutating + buffer form,
+        // stacked with arbitrary EXPOSURE / COLORCORR fuzz factors.
+        let mut img = base.clone();
+        img.header.gamma = Some(gamma);
+        img.header.exposure = Some(exposure);
+        img.header.colorcorr = Some([white_point, linear_white, scene_max]);
+        assert_eq!(
+            img.linear_scene_referred_radiance_buffer().len(),
+            n,
+            "linear scene-referred buffer len"
+        );
+        img.recover_linear_scene_referred_radiance();
+        assert_eq!(img.pixels.len(), n, "recover preserves length");
+        assert!(img.header.gamma.is_none() && img.header.exposure.is_none());
+
+        // Writer-side encoding: degenerate exponents rejected without
+        // touching the buffer; a successful call records a finite-positive
+        // GAMMA slot.
+        let mut img = base.clone();
+        let ran = img.apply_gamma_encoding(gamma);
+        assert_eq!(img.pixels.len(), n, "apply_gamma_encoding preserves length");
+        if ran {
+            let g = img.header.gamma.expect("successful encode records GAMMA");
+            assert!(g.is_finite() && g > 0.0, "recorded GAMMA stays sane");
+        } else {
+            assert!(
+                img.header.gamma.is_none(),
+                "rejected encode records nothing"
+            );
+        }
+    }
+
     // Wire-level exponent shift: every mantissa/exponent/stop shape must
     // either shift in range or report None — never panic or overflow.
     {
