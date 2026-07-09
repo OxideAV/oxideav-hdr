@@ -9,6 +9,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Other
 
+- round 404 (decoder — `GAMMA=` transfer-exponent linearisation): the
+  de-facto `GAMMA=` header variable was parsed and re-emitted but never
+  applied to the stored channels. The staged spec's "The `GAMMA=` header
+  variable" section documents `GAMMA=g` as recording that the stored
+  channels have already been gamma-encoded with exponent `g` (a
+  display-oriented, non-linear quantity), that a honouring reader
+  recovers linear radiance as `stored^g`, defaults to `1.0` (linear)
+  when absent, and that a fully-specified decode linearises **first**
+  then divides out `COLORCORR` and `EXPOSURE`. New `HdrImage` helpers:
+  `effective_gamma` (value or the `1.0` default); `linearize_gamma` /
+  `linear_radiance_buffer` (in-place `stored^g` clearing the slot, and
+  its non-mutating buffer view); `recover_linear_scene_referred_radiance`
+  / `linear_scene_referred_radiance_buffer` (the spec's
+  linearise-then-divide order composed over `EXPOSURE` + `COLORCORR`, the
+  gamma-aware extension of the `scene_referred_*` pair); and
+  `apply_gamma_encoding(g)` (writer-side inverse `stored = linear^(1/g)`
+  recording `GAMMA=g`, rejecting degenerate `g`). Absent / `1.0` /
+  degenerate exponents are identity no-ops and negative channels pass
+  through verbatim (a fractional power of a negative base is NaN). Covered
+  by 11 unit tests, an end-to-end `tests/gamma.rs` through
+  `parse_hdr` / `encode_hdr`, and an extended `colorconv` fuzz block.
+
 - round 383 (encoder — content-adaptive smallest-output RLE): new
   `RleMode::Smallest` encoder flavour that picks **per scanline**
   whichever of new-RLE and flat/uncompressed is smaller (ties to
