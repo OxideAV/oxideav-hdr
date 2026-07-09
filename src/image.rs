@@ -1109,6 +1109,38 @@ mod tests {
     }
 
     #[test]
+    fn linear_scene_referred_luminance_no_gamma_equals_plain() {
+        // Without GAMMA the gamma-aware luminance buffer must match the
+        // plain scene-referred luminance buffer.
+        let pixels = vec![0.6_f32, 0.4, 0.2, 0.9, 0.5, 0.1];
+        let mut img = HdrImage::new_rgb96f(2, 1, pixels);
+        img.header.exposure = Some(2.0);
+        img.header.colorcorr = Some([1.2, 0.8, 1.0]);
+        let plain = img.scene_referred_luminance_buffer();
+        let gamma_aware = img.linear_scene_referred_luminance_buffer();
+        assert_eq!(plain.len(), gamma_aware.len());
+        for (a, b) in plain.iter().zip(gamma_aware.iter()) {
+            assert!((a - b).abs() < 1e-4, "{a} vs {b}");
+        }
+    }
+
+    #[test]
+    fn linear_scene_referred_luminance_linearises_before_projecting() {
+        // A GAMMA-carrying picture: the luminance must be computed from
+        // stored^g, not from the raw stored channels. g=2 squares each
+        // channel before the 179*(0.265R+0.670G+0.065B) projection.
+        let stored = vec![0.5_f32, 0.5, 0.5];
+        let mut img = HdrImage::new_rgb96f(1, 1, stored);
+        img.header.gamma = Some(2.0);
+        let lum = img.linear_scene_referred_luminance_buffer();
+        // linear channel = 0.25 each ⇒ 179 * 0.25 * (0.265+0.670+0.065)=179*0.25.
+        let expect = 179.0 * 0.25 * (0.265 + 0.670 + 0.065);
+        assert!((lum[0] - expect).abs() < 1e-2, "{} vs {expect}", lum[0]);
+        // Non-mutating: slot survives.
+        assert_eq!(img.header.gamma, Some(2.0));
+    }
+
+    #[test]
     fn apply_gamma_encoding_inverts_linearize_gamma() {
         // Round-trip: encode a linear buffer with g then linearise back.
         let original = vec![0.6_f32, 0.4, 0.2, 0.9, 0.1, 0.05];
@@ -2161,6 +2193,54 @@ impl HdrImage {
             out.push(lin(px[0]) * inv_exposure * inv_cc[0]);
             out.push(lin(px[1]) * inv_exposure * inv_cc[1]);
             out.push(lin(px[2]) * inv_exposure * inv_cc[2]);
+        }
+        out
+    }
+
+    /// Allocate a fresh `width * height` buffer of per-pixel *physical*
+    /// photometric luminance (lm/sr/m²) computed from the picture's
+    /// **linear scene-referred** radiance — the stored channels
+    /// linearised through `GAMMA=` (`stored ^ g`) and then divided by the
+    /// cumulative `EXPOSURE=` multiplier and `COLORCORR=` triple — before
+    /// the §"Physical interpretation" luminance formula is applied.
+    ///
+    /// This is the gamma-aware extension of
+    /// [`Self::scene_referred_luminance_buffer`]: where that method
+    /// assumes the stored channels are already linear (correct for native
+    /// Radiance pictures, which never carry `GAMMA=`), this one first
+    /// applies the staged spec's `linear_channel = stored_channel ^ g`
+    /// linearisation, honouring the "The `GAMMA=` header variable" section's
+    /// rule that the physical-radiance recovery is "only meaningful after
+    /// the pixels have been linearised with `GAMMA`"
+    /// (`docs/image/hdr/radiance-hdr-rgbe-format.md`). The luminance itself
+    /// is the §"Physical interpretation" projection — `179 * (0.265 R +
+    /// 0.670 G + 0.065 B)` for `FORMAT=32-bit_rle_rgbe`, the recovered `Y`
+    /// verbatim for `FORMAT=32-bit_rle_xyze`.
+    ///
+    /// Non-mutating: the image's pixels and every typed header slot are
+    /// left untouched. When no `GAMMA=` record is present (or the exponent
+    /// is the `1.0` identity) it agrees exactly with
+    /// [`Self::scene_referred_luminance_buffer`]. The same permissive
+    /// degenerate-factor handling carries over, so a malformed header can
+    /// never turn the luminance buffer into NaN / ∞; negative channels are
+    /// passed through the linearisation verbatim.
+    pub fn linear_scene_referred_luminance_buffer(&self) -> Vec<f32> {
+        let g = self.effective_gamma();
+        let apply_g = g > 0.0 && g.is_finite() && (g - 1.0).abs() > f32::EPSILON;
+        let (inv_exposure, inv_cc) = self.scene_referred_recovery_factors();
+        let lin = |v: f32| if apply_g && v > 0.0 { v.powf(g) } else { v };
+        let n = (self.width as usize) * (self.height as usize);
+        let mut out = Vec::with_capacity(n);
+        for px in self.pixels.chunks_exact(3) {
+            let recovered = [
+                lin(px[0]) * inv_exposure * inv_cc[0],
+                lin(px[1]) * inv_exposure * inv_cc[1],
+                lin(px[2]) * inv_exposure * inv_cc[2],
+            ];
+            out.push(crate::xyz::luminance_lm_per_sr_per_m2(
+                recovered,
+                self.header.format,
+            ));
         }
         out
     }
