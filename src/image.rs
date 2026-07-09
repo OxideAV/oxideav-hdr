@@ -981,6 +981,170 @@ mod tests {
     }
 
     #[test]
+    fn effective_gamma_defaults_to_one_when_absent() {
+        // Staged spec: "when no GAMMA= line is present, the value is taken
+        // to be 1.0" — the linear identity.
+        let img = HdrImage::new_rgb96f(1, 1, vec![0.0, 0.0, 0.0]);
+        assert!(img.header.gamma.is_none());
+        assert!((img.effective_gamma() - 1.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn effective_gamma_returns_header_value_and_does_not_perturb_slot() {
+        let mut img = HdrImage::new_rgb96f(1, 1, vec![0.0, 0.0, 0.0]);
+        img.header.gamma = Some(2.2);
+        assert!((img.effective_gamma() - 2.2).abs() < 1e-6);
+        // Inspector contract: reading must not clear the slot.
+        assert_eq!(img.header.gamma, Some(2.2));
+    }
+
+    #[test]
+    fn linearize_gamma_applies_power_and_clears_slot() {
+        // stored^g per channel; g=2.0 squares each channel.
+        let mut img = HdrImage::new_rgb96f(1, 1, vec![0.5, 0.25, 0.1]);
+        img.header.gamma = Some(2.0);
+        img.linearize_gamma();
+        let expect = [0.25_f32, 0.0625, 0.01];
+        for (a, b) in img.pixels.iter().zip(expect.iter()) {
+            assert!((a - b).abs() < 1e-6, "{a} vs {b}");
+        }
+        assert!(img.header.gamma.is_none(), "gamma slot not cleared");
+        // Idempotent: a second call is a no-op.
+        img.linearize_gamma();
+        for (a, b) in img.pixels.clone().iter().zip(expect.iter()) {
+            assert!((a - b).abs() < 1e-6);
+        }
+    }
+
+    #[test]
+    fn linearize_gamma_identity_and_degenerate_are_noop_but_clear() {
+        // g == 1.0 and any degenerate exponent leave the pixels untouched;
+        // the slot is still cleared (matching the recover_* contract) and a
+        // negative channel is passed through verbatim rather than NaN'd.
+        for g in [1.0_f32, 0.0, -2.0, f32::NAN, f32::INFINITY] {
+            let pixels = vec![0.5_f32, -0.25, 0.0];
+            let mut img = HdrImage::new_rgb96f(1, 1, pixels.clone());
+            img.header.gamma = Some(g);
+            img.linearize_gamma();
+            for (a, b) in img.pixels.iter().zip(pixels.iter()) {
+                assert!((a - b).abs() < 1e-6, "g={g}: {a} vs {b}");
+            }
+            assert!(img.header.gamma.is_none(), "g={g}: slot not cleared");
+        }
+    }
+
+    #[test]
+    fn linear_radiance_buffer_matches_mutator_and_preserves_slot() {
+        let pixels = vec![0.5_f32, 0.25, 0.1, 0.8, 0.4, 0.2];
+        let mut img = HdrImage::new_rgb96f(2, 1, pixels);
+        img.header.gamma = Some(2.4);
+        let buf = img.linear_radiance_buffer();
+        // Non-mutating: slot and pixels untouched.
+        assert_eq!(img.header.gamma, Some(2.4));
+        let mut mutated = img.clone();
+        mutated.linearize_gamma();
+        assert_eq!(buf.len(), mutated.pixels.len());
+        for (a, b) in buf.iter().zip(mutated.pixels.iter()) {
+            assert!((a - b).abs() < 1e-6, "{a} vs {b}");
+        }
+    }
+
+    #[test]
+    fn linear_radiance_buffer_absent_gamma_equals_pixels() {
+        let img = HdrImage::new_rgb96f(1, 1, vec![0.6, 0.4, 0.2]);
+        assert_eq!(img.linear_radiance_buffer(), img.pixels);
+    }
+
+    #[test]
+    fn recover_linear_scene_referred_radiance_linearises_then_divides() {
+        // stored = (radiance^(1/g)) * EXPOSURE * COLORCORR. With radiance
+        // (1,1,1), g=2 ⇒ radiance^(1/2)=1, so stored = EXPOSURE*COLORCORR.
+        // Recovery must return (1,1,1) and clear all three slots.
+        let mut img = HdrImage::new_rgb96f(1, 1, vec![6.0, 12.0, 15.0]);
+        img.header.gamma = Some(2.0);
+        img.header.exposure = Some(3.0);
+        img.header.colorcorr = Some([2.0, 4.0, 5.0]);
+        // Pre-image: linearise (square) then divide. 6^2=36 /(3*2)=6...
+        // Use a cleaner construction: pick stored so stored^2 / (E*CC)=1.
+        // stored = sqrt(E*CC): sqrt(6)=2.449.., sqrt(12)=3.464.., sqrt(15)=3.873..
+        img.pixels = vec![6.0_f32.sqrt(), 12.0_f32.sqrt(), 15.0_f32.sqrt()];
+        img.recover_linear_scene_referred_radiance();
+        for c in &img.pixels {
+            assert!((c - 1.0).abs() < 1e-5, "{c}");
+        }
+        assert!(img.header.gamma.is_none());
+        assert!(img.header.exposure.is_none());
+        assert!(img.header.colorcorr.is_none());
+    }
+
+    #[test]
+    fn recover_linear_scene_referred_radiance_matches_buffer_view() {
+        let pixels = vec![0.7_f32, 0.5, 0.3, 0.9, 0.6, 0.2];
+        let mut img = HdrImage::new_rgb96f(2, 1, pixels);
+        img.header.gamma = Some(2.2);
+        img.header.exposure = Some(1.5);
+        img.header.colorcorr = Some([1.1, 0.9, 1.05]);
+        let expect = img.linear_scene_referred_radiance_buffer();
+        img.recover_linear_scene_referred_radiance();
+        assert_eq!(img.pixels.len(), expect.len());
+        for (a, b) in img.pixels.iter().zip(expect.iter()) {
+            assert!((a - b).abs() < 1e-6, "{a} vs {b}");
+        }
+    }
+
+    #[test]
+    fn linear_scene_referred_buffer_no_gamma_equals_scene_referred() {
+        // Without GAMMA the gamma-aware buffer must equal the plain
+        // EXPOSURE/COLORCORR recovery buffer.
+        let pixels = vec![6.0_f32, 12.0, 15.0, 1.0, 2.0, 4.0];
+        let mut img = HdrImage::new_rgb96f(2, 1, pixels);
+        img.header.exposure = Some(3.0);
+        img.header.colorcorr = Some([2.0, 4.0, 5.0]);
+        let plain = img.scene_referred_radiance_buffer();
+        let gamma_aware = img.linear_scene_referred_radiance_buffer();
+        assert_eq!(plain.len(), gamma_aware.len());
+        for (a, b) in plain.iter().zip(gamma_aware.iter()) {
+            assert!((a - b).abs() < 1e-6, "{a} vs {b}");
+        }
+    }
+
+    #[test]
+    fn apply_gamma_encoding_inverts_linearize_gamma() {
+        // Round-trip: encode a linear buffer with g then linearise back.
+        let original = vec![0.6_f32, 0.4, 0.2, 0.9, 0.1, 0.05];
+        let mut img = HdrImage::new_rgb96f(2, 1, original.clone());
+        assert!(img.apply_gamma_encoding(2.2));
+        assert_eq!(img.header.gamma, Some(2.2));
+        // Encoded buffer differs from the linear original.
+        assert!(img
+            .pixels
+            .iter()
+            .zip(original.iter())
+            .any(|(a, b)| (a - b).abs() > 1e-3));
+        img.linearize_gamma();
+        for (a, b) in img.pixels.iter().zip(original.iter()) {
+            assert!((a - b).abs() < 1e-5, "{a} vs {b}");
+        }
+        assert!(img.header.gamma.is_none());
+    }
+
+    #[test]
+    fn apply_gamma_encoding_rejects_degenerate_and_records_unit() {
+        let mut img = HdrImage::new_rgb96f(1, 1, vec![0.5, 0.4, 0.3]);
+        for g in [0.0_f32, -1.0, f32::NAN, f32::INFINITY] {
+            let before = img.pixels.clone();
+            assert!(!img.apply_gamma_encoding(g), "g={g} should reject");
+            assert_eq!(img.pixels, before, "g={g} must leave pixels untouched");
+            assert!(img.header.gamma.is_none(), "g={g} must not record");
+        }
+        // Exact 1.0 is the identity but still records GAMMA=1.
+        let before = img.pixels.clone();
+        assert!(img.apply_gamma_encoding(1.0));
+        assert_eq!(img.pixels, before);
+        assert_eq!(img.header.gamma, Some(1.0));
+    }
+
+    #[test]
     fn effective_exposure_defaults_to_one_when_absent() {
         // Spec: "No EXPOSURE ⇒ none applied." Helper returns 1.0 (the
         // identity multiplier) when the slot is None.
@@ -1626,6 +1790,29 @@ impl HdrImage {
         self.header.primaries.unwrap_or(Primaries::RADIANCE)
     }
 
+    /// The `GAMMA=` transfer exponent the picture declared, with the
+    /// staged-spec default of `1.0` (linear pixels, no correction)
+    /// substituted when no record is present.
+    ///
+    /// Per the staged spec's "The `GAMMA=` header variable" section
+    /// (`docs/image/hdr/radiance-hdr-rgbe-format.md`), `GAMMA=g` records
+    /// that the stored channels "have already been gamma-corrected with
+    /// exponent `g`" — a display-oriented, non-linear quantity rather than
+    /// linear radiance — and "when no `GAMMA=` line is present, the value
+    /// is taken to be `1.0`, meaning no gamma correction has been applied
+    /// and the stored pixels are already linear". `GAMMA=` is a de-facto
+    /// extension outside the canonical seven header variables, so pictures
+    /// written by native Radiance tools omit it and this helper returns the
+    /// linear identity for them. Consumers that need to distinguish "file
+    /// declared `GAMMA=1` explicitly" from "no record was present" should
+    /// match on [`HdrHeader::gamma`] directly.
+    ///
+    /// Mirrors [`Self::effective_exposure`] / [`Self::effective_pixaspect`]
+    /// / [`Self::effective_primaries`] in shape.
+    pub fn effective_gamma(&self) -> f32 {
+        self.header.gamma.unwrap_or(1.0)
+    }
+
     /// Apply the header's `COLORCORR` per-channel multiplier to every
     /// float channel and clear the header slot.
     ///
@@ -1843,6 +2030,185 @@ impl HdrImage {
     pub fn recover_scene_referred_radiance(&mut self) {
         self.recover_original_radiance();
         self.recover_original_colorcorr();
+    }
+
+    /// Linearise the stored float channels through the header's `GAMMA=`
+    /// transfer exponent **in place** and clear the header slot.
+    ///
+    /// Per the staged spec's "The `GAMMA=` header variable" section
+    /// (`docs/image/hdr/radiance-hdr-rgbe-format.md`), a picture that
+    /// carries `GAMMA=g` stores channels that "have already been
+    /// gamma-corrected with exponent `g`" — the mantissas are a
+    /// gamma-encoded, display-oriented quantity, not linear radiance — and
+    /// "a reader that honours `GAMMA=g` must apply the inverse of the
+    /// recorded encoding to each channel to obtain a linear value", namely
+    /// `linear_channel = stored_channel ^ g` per channel, so that `g = 1.0`
+    /// (or an absent header) is the identity.
+    ///
+    /// This raises every channel of [`Self::pixels`] to the power `g` and
+    /// clears [`HdrHeader::gamma`], so the buffer is now linear and a
+    /// re-encode neither re-declares nor double-applies the correction. It
+    /// is the gamma counterpart to [`Self::apply_exposure`] /
+    /// [`Self::apply_colorcorr`] (a stored-into-pixels operation that
+    /// clears the slot). A `None` slot, an exact `1.0`, and any degenerate
+    /// exponent (`0.0`, negative, or non-finite) are treated as the
+    /// identity no-op — the same permissive handling the `recover_*` /
+    /// `apply_*` helpers use — so a malformed `GAMMA=` can never turn the
+    /// buffer into NaN / ∞. A `0.0` channel maps to `0.0`; a negative
+    /// channel (out of gamut, never produced by an RGBE decode) is passed
+    /// through verbatim rather than raised to a fractional power, which
+    /// would be NaN. A second call is a no-op (the slot is `None`).
+    pub fn linearize_gamma(&mut self) {
+        if let Some(g) = self.header.gamma.take() {
+            if g > 0.0 && g.is_finite() && (g - 1.0).abs() > f32::EPSILON {
+                for v in &mut self.pixels {
+                    if *v > 0.0 {
+                        *v = v.powf(g);
+                    }
+                }
+            }
+        }
+    }
+
+    /// Allocate a fresh `width * height * 3` float buffer of the picture's
+    /// **linearised** channels — the stored channels put through the
+    /// `GAMMA=` transfer exponent (`stored ^ g`) — without mutating the
+    /// image.
+    ///
+    /// This is the non-mutating counterpart to [`Self::linearize_gamma`]:
+    /// where that method rewrites [`Self::pixels`] in place and clears the
+    /// slot, this returns a fresh copy in the same packed top-down layout
+    /// and leaves the picture's pixels and [`HdrHeader::gamma`] slot
+    /// untouched, so the record survives a re-encode and the buffer can be
+    /// requested repeatedly. It applies the staged spec's
+    /// `linear_channel = stored_channel ^ g` linearisation rule (see
+    /// [`Self::linearize_gamma`]); when no `GAMMA=` record is present, or
+    /// the exponent is exactly `1.0` or degenerate (`0.0` / negative /
+    /// non-finite), the returned buffer equals [`Self::pixels`] exactly.
+    /// Negative channels are passed through verbatim (a fractional power of
+    /// a negative base is NaN) and `0.0` maps to `0.0`.
+    pub fn linear_radiance_buffer(&self) -> Vec<f32> {
+        let g = self.effective_gamma();
+        let apply = g > 0.0 && g.is_finite() && (g - 1.0).abs() > f32::EPSILON;
+        let mut out = Vec::with_capacity(self.pixels.len());
+        for &v in &self.pixels {
+            out.push(if apply && v > 0.0 { v.powf(g) } else { v });
+        }
+        out
+    }
+
+    /// Reconstruct the picture's **linear scene-referred radiance** in
+    /// place: first linearise the stored channels through `GAMMA=`
+    /// (`stored ^ g`), then divide out the cumulative `EXPOSURE=`
+    /// multiplier and the `COLORCORR=` triple, clearing all three header
+    /// slots.
+    ///
+    /// This is the fully-specified decode the staged spec's "The `GAMMA=`
+    /// header variable" section describes
+    /// (`docs/image/hdr/radiance-hdr-rgbe-format.md`): "A fully-specified
+    /// decode therefore linearises first (`stored^g`), then divides out
+    /// `COLORCORR` and `EXPOSURE`" — because once `GAMMA` has been applied
+    /// the stored numbers are no longer linear, so the physical-radiance
+    /// recovery for `EXPOSURE` / `COLORCORR` (both *linear* scale factors)
+    /// is only meaningful after linearisation. It is the one-shot
+    /// composition of [`Self::linearize_gamma`] followed by
+    /// [`Self::recover_scene_referred_radiance`], in that spec-mandated
+    /// order.
+    ///
+    /// After this call the buffer holds linear scene-referred radiance and
+    /// the [`HdrHeader::gamma`] / [`HdrHeader::exposure`] /
+    /// [`HdrHeader::colorcorr`] slots are cleared, so a re-encode does not
+    /// re-bake or re-declare any of them. In native Radiance pictures
+    /// `GAMMA` is absent and the data are already linear, so this reduces
+    /// to [`Self::recover_scene_referred_radiance`]. All three components'
+    /// permissive edge-case handling (identity / `None` / degenerate → no
+    /// op, slot still cleared) carries over, and a second call is a no-op.
+    /// It is the mutating counterpart to
+    /// [`Self::linear_scene_referred_radiance_buffer`].
+    pub fn recover_linear_scene_referred_radiance(&mut self) {
+        self.linearize_gamma();
+        self.recover_scene_referred_radiance();
+    }
+
+    /// Allocate a fresh `width * height * 3` float buffer of the picture's
+    /// **linear scene-referred radiance** — the stored channels
+    /// linearised through `GAMMA=` (`stored ^ g`) and then divided by the
+    /// cumulative `EXPOSURE=` multiplier and `COLORCORR=` triple — without
+    /// mutating the image.
+    ///
+    /// This is the non-mutating counterpart to
+    /// [`Self::recover_linear_scene_referred_radiance`] and the
+    /// gamma-aware extension of [`Self::scene_referred_radiance_buffer`]:
+    /// it applies the staged spec's fully-specified decode order
+    /// (`docs/image/hdr/radiance-hdr-rgbe-format.md`, "linearises first
+    /// (`stored^g`), then divides out `COLORCORR` and `EXPOSURE`") in one
+    /// allocation, leaving [`Self::pixels`] and every typed header slot
+    /// untouched so the records survive a re-encode. When no `GAMMA=`
+    /// record is present (or the exponent is the `1.0` identity) it agrees
+    /// exactly with [`Self::scene_referred_radiance_buffer`]; when none of
+    /// the three records is present it equals [`Self::pixels`]. The same
+    /// permissive degenerate-factor handling the component operations use
+    /// carries over, so a malformed header can never turn the buffer into
+    /// NaN / ∞ (negative channels are passed through the linearisation
+    /// verbatim).
+    pub fn linear_scene_referred_radiance_buffer(&self) -> Vec<f32> {
+        let g = self.effective_gamma();
+        let apply_g = g > 0.0 && g.is_finite() && (g - 1.0).abs() > f32::EPSILON;
+        let (inv_exposure, inv_cc) = self.scene_referred_recovery_factors();
+        let lin = |v: f32| if apply_g && v > 0.0 { v.powf(g) } else { v };
+        let mut out = Vec::with_capacity(self.pixels.len());
+        for px in self.pixels.chunks_exact(3) {
+            out.push(lin(px[0]) * inv_exposure * inv_cc[0]);
+            out.push(lin(px[1]) * inv_exposure * inv_cc[1]);
+            out.push(lin(px[2]) * inv_exposure * inv_cc[2]);
+        }
+        out
+    }
+
+    /// Gamma-encode the stored (linear) float channels with transfer
+    /// exponent `gamma` **in place** and record `GAMMA=gamma` in the
+    /// header — the writer-side inverse of [`Self::linearize_gamma`].
+    ///
+    /// Per the staged spec's "The `GAMMA=` header variable" section
+    /// (`docs/image/hdr/radiance-hdr-rgbe-format.md`), a file that carries
+    /// `GAMMA=g` stores channels encoded as `stored = linear ^ (1/g)` (so
+    /// that the honouring reader recovers `linear = stored ^ g`). This
+    /// helper assumes the current buffer holds linear channels, raises each
+    /// to the power `1/gamma`, and sets [`HdrHeader::gamma`] to `gamma` so
+    /// the encoding is recorded for the reader to undo. It is the gamma
+    /// analogue of [`Self::adjust_exposure_factor`] — a paired
+    /// pixel-and-header write that keeps the file self-consistent.
+    ///
+    /// The staged spec notes `GAMMA=` is a de-facto extension outside the
+    /// canonical specification, that "canonical Radiance readers ignore it
+    /// and assume linear pixels", and that "writers targeting maximum
+    /// interoperability with native Radiance should emit linear pixels and
+    /// omit `GAMMA` (equivalently `GAMMA=1`)" — so prefer leaving pixels
+    /// linear unless you specifically need a gamma-encoded file.
+    ///
+    /// Returns `true` when the encoding was applied. A degenerate `gamma`
+    /// (`0.0`, negative, or non-finite) is rejected as `false` with the
+    /// picture untouched. An exact `1.0` is the identity: pixels are left
+    /// unchanged, but `GAMMA=1.0` is still recorded (an explicit
+    /// linear-marker), and `true` is returned. The round-trip
+    /// `apply_gamma_encoding(g)` then [`Self::linearize_gamma`] restores
+    /// the linear channels to within `f32` power-function precision.
+    /// Negative channels are passed through verbatim (a fractional power of
+    /// a negative base is NaN); `0.0` maps to `0.0`.
+    pub fn apply_gamma_encoding(&mut self, gamma: f32) -> bool {
+        if !(gamma.is_finite() && gamma > 0.0) {
+            return false;
+        }
+        if (gamma - 1.0).abs() > f32::EPSILON {
+            let inv = 1.0 / gamma;
+            for v in &mut self.pixels {
+                if *v > 0.0 {
+                    *v = v.powf(inv);
+                }
+            }
+        }
+        self.header.gamma = Some(gamma);
+        true
     }
 
     /// Allocate a fresh `width * height` buffer of per-pixel *physical*
