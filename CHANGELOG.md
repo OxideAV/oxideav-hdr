@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `register_runtime` + the `oxideav_core::register!` entry point, so
+  `oxideav_meta::register_all` now dispatches this crate automatically;
+  the two-registry `register` remains the direct API.
+
 ### Other
 
 - round 404 (decoder — `GAMMA=` transfer-exponent linearisation): the
