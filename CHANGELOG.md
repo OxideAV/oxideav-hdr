@@ -7,6 +7,48 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.0.5](https://github.com/OxideAV/oxideav-hdr/compare/v0.0.4...v0.0.5) - 2026-07-18
+
+### Other
+
+- RuntimeContext entry point — register_runtime + the register! macro
+- cover the gamma luminance buffer in README + colorconv fuzz
+- deterministic property sweep for the GAMMA helpers
+- gamma-aware physical luminance buffer
+- document the GAMMA= linearisation subsystem (README + CHANGELOG)
+- extend colorconv fuzz target over the GAMMA helpers
+- end-to-end GAMMA= tests through parse_hdr/encode_hdr
+- GAMMA linearisation subsystem on the decoded float buffer
+- add CI / crates.io / docs.rs / MIT-license badges
+- Add RleMode::Smallest: per-scanline content-adaptive new-RLE vs flat
+- Extend colorconv fuzz target + wire-level pipeline tests for r383 surface
+- Add xyze_24x10_newrle.hdr fixture pinning XYZE wire + luminance semantics
+- Add rgbe_shift_exponent: exact 2^stops scaling on the wire quad
+- Add record-consistent exposure adjustment (factor + integer stops)
+- Add file-faithful photometric RGBE<->XYZE whole-image converters
+- Fix XYZE photometric luminance to spec: Y verbatim, not 179*Y
+- document old-RLE leading-sentinel rejection + cross-scanline run acceptance (round 378)
+- round 378 (depth — old-RLE cross-scanline run interop coverage): pin decoder acceptance of a sentinel-led second scanline
+- round 378 (depth — public-API coverage for leading-sentinel rejection): pin the old-RLE first-scanline guard end-to-end through parse_hdr
+- round 378 (depth — old-RLE decode robustness): reject leading sentinel with no previous pixel
+- encoder fuzz target + 256-case full-option round-trip matrix
+- end-to-end public-API test for scene-referred radiance recovery
+- recover_scene_referred_radiance — one-shot EXPOSURE+COLORCORR undo
+- scene-referred RGB radiance recovery buffer (non-mutating)
+- reorient integration tests + README/coverage rows
+- geometric reorientation subsystem — D4 group + HdrImage transforms
+- document bit-exact RGBE-quad round-trip surface (README + CHANGELOG)
+- extend round-trip matrix to XYZE format
+- property-test matrix for bit-exact RGBE-quad round-trips
+- bit-exact RGBE-quad round-trip surface (HdrImage::{from,to}_rgbe_quads)
+- round 332 (depth — profile micro-opt): bulk-fill RLE repeat-run decode
+- PIXASPECT-corrected display geometry helpers (square_pixel_dimensions / display_aspect_ratio)
+- add HdrImage::scene_referred_luminance_buffer (physical luminance after EXPOSURE/COLORCORR recovery)
+- round 319 (depth — fuzz): add `colorconv` target for the float colour pipeline
+- round 316: preserve header program/command lines instead of rejecting
+- tolerate surrounding whitespace in FORMAT= value (round 313)
+- refresh to current status, drop per-round changelog cruft
+
 ### Added
 
 - `register_runtime` + the `oxideav_core::register!` entry point, so
