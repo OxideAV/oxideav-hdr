@@ -7,6 +7,84 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- The crate root now follows the OxideAV image-crate API contract
+  (`IMAGE_CRATE_API`): `probe`, `info -> ImageInfo`, `decode` /
+  `decode_with(&DecodeOptions) -> HdrImage`, `decode_rgb8 -> RgbImage`,
+  `decode_rgba8 -> RgbaImage`, `decode_from<R: Read>`,
+  `encode(&HdrImage, &EncodeOptions)`, `encode_rgb8`, `encode_rgba8`,
+  `encode_to<W: Write>`.
+- `HdrImage` is the contract shape: `width`, `height`, `format:
+  PixelFormat` (was the `pixel_format` field), `planes: Vec<Plane>` (one
+  packed little-endian `f32` RGB plane — replaces the `pixels: Vec<f32>`
+  field; use `pixels()` / `pixel(x, y)` / `for_each_pixel` /
+  `map_pixels` / `map_samples` for the float view and `as_bytes()` /
+  `into_raw()` for the bytes), `color: ColorInfo` and `metadata:
+  Metadata` (derived from `PRIMARIES=` / `GAMMA=`), `header: HdrHeader`.
+  The struct is `#[non_exhaustive]`; constructors are fallible: `new`,
+  `packed`, `from_f32`, `from_rgb8`, `from_rgba8`,
+  `from_rgb8_with_gamma`, `from_rgba8_with_gamma` and
+  `from_rgbe_quads` (now `-> Result`) validate the geometry. New
+  `to_rgb8` / `to_rgba8` (clamp `[0, 1]` × 255, XYZE converted to RGB
+  first), `to_rgb8_with_exposure(stops)`, `with_header` /
+  `with_color` / `with_metadata`, `sync_color_from_header`,
+  `is_tightly_packed`, `stride`, `bytes_per_pixel`.
+- `HdrPixelFormat::Rgb96f` is now `HdrPixelFormat::RgbF32Le` (mirrors
+  `oxideav_core::PixelFormat`); `PixelFormat` is the contract alias.
+- `HdrError`: `TooLarge` is now `LimitExceeded`; new `Io(std::io::Error)`
+  variant with `From<std::io::Error>`; the enum is `#[non_exhaustive]`
+  and no longer derives `Clone` / `PartialEq` / `Eq`; `Error` alias.
+- `EncodeOptions::default()` uses `RleMode::Auto` (new-RLE when the
+  on-disk scanline width is in `8..=32767`, old-RLE otherwise) and
+  preserves the decoded magic identifier (`magic: None`); the deprecated
+  `encode_hdr*` wrappers keep their historical `RleMode::New` /
+  `#?RADIANCE` behaviour.
+- `DecodeOptions::default()` caps the decoded plane at 1 GiB (was 256 MiB
+  via `HdrLimits`); the 32 767 dimension caps are unchanged. New
+  `strict` mode rejects a non-canonical magic identifier, a header
+  without `FORMAT=`, and trailing bytes after the last scanline.
+- Registry: `register(&mut RuntimeContext)` is the fleet entry point;
+  the former two-registry `register(codecs, containers)` is now
+  `register_registries`. The framework `Decoder` emits the native
+  `RgbF32Le` frame with the colour-signal side-channel instead of a
+  tone-mapped `Rgb24` frame; the `Encoder` accepts `RgbF32Le` natively
+  and `Rgb24` / `Rgba` through the raw-path rule (`b / 255`, alpha
+  dropped) and exposes the `rle` / `line_ending` / `exposure` /
+  `software` / `gamma` / `input_gamma` options schema. The container's
+  stream parameters carry `RgbF32Le` and the header-derived colour
+  signal. New frame bridge: `From<HdrImage> for VideoFrame`,
+  `HdrImage::from_video_frame(&VideoFrame, &CodecParameters) ->
+  Result<HdrImage, HdrError>`, `TryFrom<(&VideoFrame,
+  &CodecParameters)>`, `HdrPixelFormat` ⇄ `PixelFormat`, `ColorInfo` ⇄
+  `ColorSignal`.
+- `HdrError::LimitExceeded` maps to `oxideav_core::Error::ResourceExhausted`
+  (was `InvalidData`).
+
+### Deprecated
+
+- `parse_hdr`, `parse_hdr_with_limits`, `parse_hdr_with_options`,
+  `parse_hdr_with_options_and_limits` → `decode` / `decode_with`.
+- `encode_hdr`, `encode_hdr_with_rle`, `encode_hdr_with_options`,
+  `encode_hdr_with_full_options`, `encode_hdr_preserving_magic`,
+  `encode_hdr_rgb96f` → `encode` with `EncodeOptions` fields.
+- `HdrLimits` → `DecodeOptions` (`From<HdrLimits> for DecodeOptions`).
+- `HdrImage::new_rgb96f` → `HdrImage::from_f32`;
+  `HdrImage::pixel_format()` → the `format` field;
+  `HdrPixelFormat::Rgb96f` → `RgbF32Le`; `HdrError::too_large` →
+  `HdrError::limit`.
+- `register_runtime` → `register`; `parse_hdr_videoframe` →
+  `VideoFrame::from(decode(..)?)`.
+
+### Added
+
+- `Plane`, `ColorInfo`, `ColorRange`, `Metadata`, `RgbImage`,
+  `RgbaImage`, `ImageInfo` (with `rgbe_format`, `orientation`, `header`
+  extras), `DecodeOptions`, `EncodeOptions`.
+- `ci-standalone` runs clippy on the `--no-default-features` build; the
+  `decode` fuzz target covers `probe` / `info` / `decode` (lenient and
+  strict) / `decode_rgb8`.
+
 ## [0.0.5](https://github.com/OxideAV/oxideav-hdr/compare/v0.0.4...v0.0.5) - 2026-07-18
 
 ### Other

@@ -1,4 +1,8 @@
 # oxideav-hdr — benchmark suite (round 285)
+> Note: the entry points named below predate the image-crate API
+> contract — `parse_hdr*` is now `decode` / `decode_with` and
+> `encode_hdr_with_rle` is `encode` with `EncodeOptions::with_rle`; the
+> bench bodies call the contract functions, the numbers are unchanged.
 
 Criterion micro-benchmarks covering the whole hot surface of the crate:
 both directions of the Radiance RGBE codec in all three on-disk
