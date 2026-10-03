@@ -4,7 +4,7 @@
 //! options and assert every choice survives a decode round trip.
 //!
 //! The existing `roundtrip` target only ever exercises the
-//! `encode_hdr` *default* path: the `#?RADIANCE` magic line, an
+//! `encode` *default* path: the `#?RADIANCE` magic line, an
 //! all-default header (no typed records), `RleMode::New`, and
 //! `LineEnding::Lf`. That leaves the bulk of the encoder's branch
 //! surface unfuzzed — the three other RLE flavours, the CRLF text
@@ -30,7 +30,7 @@
 //!    free-form extra,
 //!  * a fuzz-driven positive-float pixel buffer.
 //!
-//! It encodes via [`encode_hdr_with_full_options`] (RLE × line-ending ×
+//! It encodes via [`encode`] (RLE × line-ending ×
 //! magic) after setting the orientation + format + records on the
 //! header, decodes with the [`FallbackMode`] matching the chosen RLE
 //! flavour, and asserts:
@@ -193,7 +193,7 @@ fuzz_target!(|data: &[u8]| {
     };
 
     let decoded = decode_with(&encoded, &DecodeOptions::default().with_fallback(fallback))
-        .expect("encoder output must be parseable by parse_hdr_with_options");
+        .expect("encoder output must be parseable by decode_with");
 
     assert_eq!(decoded.width, width, "width survives round trip");
     assert_eq!(decoded.height, height, "height survives round trip");

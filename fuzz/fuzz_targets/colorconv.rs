@@ -5,7 +5,7 @@
 //! tone-mapping operators — on hostile float input.
 //!
 //! The other four targets all enter through the *byte* surface
-//! (`parse_hdr` / `encode_hdr`), which means every float that reaches
+//! (`decode` / `encode`), which means every float that reaches
 //! the conversion and tone-mapping code has already been laundered
 //! through the RGBE shared-exponent quantiser: it is finite,
 //! non-negative, and bounded by `mantissa * 2^(exp-136)`. That makes

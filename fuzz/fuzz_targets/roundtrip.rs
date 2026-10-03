@@ -7,9 +7,9 @@
 //! 4-byte RGBE encoding rounds three float channels onto a single
 //! 8-bit shared exponent — so this is a "structure round-trips"
 //! check, not a "bytes round-trip" one. The fuzzer drives the
-//! dimensions (kept comfortably inside the default `HdrLimits` the
+//! dimensions (kept comfortably inside the default `DecodeOptions` the
 //! decoder applies after the encode) and a synthetic gradient sourced
-//! from the remaining fuzz input, runs `encode_hdr` → `parse_hdr`, and
+//! from the remaining fuzz input, runs `encode` → `decode`, and
 //! asserts:
 //!
 //!  * the decoded width/height match the encoded ones,
@@ -42,7 +42,7 @@ fuzz_target!(|data: &[u8]| {
     // Range `8..=263` keeps every encode comfortably inside the
     // new-RLE addressable range `8..=32767` (so the encoder's default
     // path fires) and the worst-case buffer (263 × 263 × 12 ≈ 829 KiB)
-    // well below the default `max_pixel_bytes` (256 MiB).
+    // well below the default `max_bytes` (1 GiB).
     let width: u32 = u32::from(data[0]) + 8;
     let height: u32 = u32::from(data[1]) + 8;
 
@@ -77,7 +77,7 @@ fuzz_target!(|data: &[u8]| {
         Err(_) => return,
     };
 
-    let decoded = decode(&encoded).expect("encode_hdr output must be parseable by parse_hdr");
+    let decoded = decode(&encoded).expect("encode output must be parseable by decode");
 
     assert_eq!(decoded.width, width, "width survives round trip");
     assert_eq!(decoded.height, height, "height survives round trip");

@@ -14,10 +14,10 @@ cargo-fuzz = true
 #    `EXPOSURE` / `COLORCORR` / `PRIMARIES` float parses, the
 #    `KEY=VALUE` split, the empty-line terminator).
 #  * The resolution line — eight axis-flag orderings, two integers
-#    (width + height) parsed straight out of the file. Round 202 added
-#    `HdrLimits` to gate the integers; the `decode` and `roundtrip`
-#    targets exercise the default and unbounded limit modes so any
-#    future change to the gating logic shows up here first.
+#    (width + height) parsed straight out of the file. `DecodeOptions`
+#    gates the integers; the `decode` and `roundtrip` targets exercise
+#    the default limits so any future change to the gating logic shows
+#    up here first.
 #  * The pixel section — new-RLE (`0x02 0x02 hi lo` marker + per-
 #    channel literal/repeat runs), old-RLE (per-pixel literals chained
 #    with `(1,1,1,n)` sentinel pixels), and uncompressed (flat
@@ -26,10 +26,12 @@ cargo-fuzz = true
 #
 # Six targets:
 #
-#  * `decode`     — feed arbitrary bytes to `parse_hdr` and assert the
-#                   call always *returns* (Result-vs-panic). Default
-#                   `HdrLimits` apply, so the worst-case allocation is
-#                   capped at the 256 MiB pixel-byte ceiling. Catches
+#  * `decode`     — feed arbitrary bytes to `probe` / `info` / `decode`
+#                   (lenient + strict) / `decode_rgb8` and assert every
+#                   call *returns* (Result-vs-panic); a successful decode
+#                   must agree with `info` and re-`encode`. Default
+#                   `DecodeOptions` apply, so the worst-case allocation is
+#                   capped at the 1 GiB plane ceiling. Catches
 #                   panics, integer overflows on dimension arithmetic,
 #                   out-of-bounds reads in the RLE inner loops, and any
 #                   downstream assertion the decoder might trip on
@@ -77,13 +79,13 @@ cargo-fuzz = true
 #                   then decode with the matching `FallbackMode` and
 #                   assert dimensions, `FORMAT`, orientation and every
 #                   typed record survive. The `roundtrip` target only
-#                   exercises the `encode_hdr` default path (RADIANCE +
+#                   exercises the `encode` default path (RADIANCE +
 #                   default header + New-RLE + Lf); this one reaches the
 #                   header writer and the three other RLE flavours.
 #
 # The crate is pulled in with `default-features = false` so the fuzz
-# build exercises the framework-free standalone `parse_hdr` /
-# `encode_hdr` path and never links `oxideav-core`.
+# build exercises the framework-free standalone `decode` / `encode`
+# path and never links `oxideav-core`.
 
 [dependencies]
 libfuzzer-sys = "0.4"

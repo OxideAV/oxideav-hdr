@@ -15,7 +15,7 @@
 //! mid-line `=` placement, comment lines (`#…`), UTF-8 boundary
 //! splits, etc.
 //!
-//! `parse_hdr` applies the default `HdrLimits` so the trailing
+//! `decode` applies the default `DecodeOptions` so the trailing
 //! pixel-section read is bounded regardless of what the header parse
 //! does.
 
@@ -23,7 +23,7 @@ use libfuzzer_sys::fuzz_target;
 use oxideav_hdr::{decode};
 
 fuzz_target!(|data: &[u8]| {
-    // Strip any embedded NUL bytes — `parse_hdr` reads the header as
+    // Strip any embedded NUL bytes — `decode` reads the header as
     // line-delimited UTF-8 and a stray NUL would just look like one
     // more byte in a value, which doesn't add coverage. Skip the
     // input rather than smuggle them in.

@@ -2,7 +2,7 @@
 
 //! Drive the corpus straight into the pixel-section (RLE) decoders.
 //!
-//! `decode.rs` feeds wholly arbitrary bytes to `parse_hdr`, which is
+//! `decode.rs` feeds wholly arbitrary bytes to `decode`, which is
 //! the right shape for catching panics anywhere in the pipeline — but
 //! libFuzzer has to stumble onto a valid `#?RADIANCE` magic, a blank
 //! line, *and* a well-formed `-Y H +X W` resolution line all by chance
@@ -18,7 +18,7 @@
 //! then appends the *rest* of the fuzz input verbatim as the pixel
 //! section. The width/height are derived from two fuzz bytes and
 //! capped small so the decoder's per-scanline buffers stay bounded
-//! (the default `HdrLimits` also gate the resolution integers, but
+//! (the default `DecodeOptions` also gate the resolution integers, but
 //! keeping the chosen dims tiny means the fuzzer spends its effort on
 //! the run-code grammar rather than on allocating large buffers).
 //!
