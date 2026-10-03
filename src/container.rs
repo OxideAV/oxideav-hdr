@@ -13,6 +13,8 @@ use oxideav_core::{
     ContainerRegistry, Demuxer, Muxer, ProbeData, ProbeScore, ReadSeek, WriteSeek, MAX_PROBE_SCORE,
 };
 
+/// Register the demuxer, muxer, `.hdr` / `.pic` extensions and the
+/// magic-line probe under the container name `"hdr"`.
 pub fn register(reg: &mut ContainerRegistry) {
     reg.register_demuxer("hdr", open_demuxer);
     reg.register_muxer("hdr", open_muxer);
@@ -22,7 +24,7 @@ pub fn register(reg: &mut ContainerRegistry) {
 }
 
 fn probe(data: &ProbeData) -> ProbeScore {
-    if data.buf.starts_with(b"#?RADIANCE") || data.buf.starts_with(b"#?RGBE") {
+    if crate::probe(data.buf) {
         MAX_PROBE_SCORE
     } else if matches!(data.ext, Some("hdr") | Some("pic")) {
         oxideav_core::PROBE_SCORE_EXTENSION
@@ -31,6 +33,10 @@ fn probe(data: &ProbeData) -> ProbeScore {
     }
 }
 
+/// Open a Radiance picture as a one-packet video stream. The stream's
+/// `CodecParameters` carry the display dimensions from the resolution
+/// line and the native `RgbF32Le` layout; the colour signal derived
+/// from the header is attached when it specifies primaries.
 pub fn open_demuxer(
     mut input: Box<dyn ReadSeek>,
     _codecs: &dyn CodecResolver,
@@ -38,17 +44,21 @@ pub fn open_demuxer(
     input.seek(SeekFrom::Start(0))?;
     let mut buf = Vec::new();
     input.read_to_end(&mut buf)?;
-    if !(buf.starts_with(b"#?RADIANCE") || buf.starts_with(b"#?RGBE")) {
-        return Err(Error::invalid("HDR: missing #?RADIANCE / #?RGBE magic"));
+    if !buf.starts_with(b"#?") {
+        return Err(Error::invalid("HDR: missing #? magic line"));
     }
-    // Pull width/height out of the header so the StreamInfo carries
-    // accurate metadata without having to fully decode the pixel
-    // array.
-    let (width, height) = peek_dimensions(&buf).unwrap_or((0, 0));
+    // Pull width/height (and the colour signal) out of the header so
+    // the StreamInfo carries accurate metadata without decoding the
+    // pixel array. A malformed header is reported by the decoder.
+    let info = crate::info(&buf).ok();
+    let (width, height) = info.as_ref().map(|i| (i.width, i.height)).unwrap_or((0, 0));
     let mut params = CodecParameters::video(CodecId::new(crate::CODEC_ID_STR));
     params.width = Some(width);
     params.height = Some(height);
-    params.pixel_format = Some(PixelFormat::Rgb24);
+    params.pixel_format = Some(PixelFormat::RgbF32Le);
+    if let Some(i) = &info {
+        params.color_signal = crate::registry::to_color_signal(&i.color);
+    }
     let stream = StreamInfo {
         index: 0,
         params,
@@ -60,51 +70,6 @@ pub fn open_demuxer(
         streams: vec![stream],
         data: Some(buf),
     }))
-}
-
-/// Best-effort width/height read from the header without invoking the
-/// full decoder. Returns `None` for malformed inputs — the caller
-/// falls back to `(0, 0)` and the actual decode reports the error.
-fn peek_dimensions(buf: &[u8]) -> Option<(u32, u32)> {
-    // Find the empty line that ends the KEY=VALUE block, then parse
-    // the next line as the resolution line.
-    let mut i = 0;
-    let mut prev_was_lf = false;
-    while i < buf.len() {
-        if buf[i] == b'\n' {
-            if prev_was_lf {
-                // Empty line — i is the position of the second \n.
-                let res_start = i + 1;
-                let nl = buf[res_start..].iter().position(|&b| b == b'\n')?;
-                let line = &buf[res_start..res_start + nl];
-                let s = std::str::from_utf8(line).ok()?;
-                let toks: Vec<&str> = s.split_whitespace().collect();
-                if toks.len() != 4 {
-                    return None;
-                }
-                // Find which token is X and which is Y.
-                let mut x = None;
-                let mut y = None;
-                for pair in toks.chunks(2) {
-                    let flag = pair.first()?;
-                    let val: u32 = pair.get(1)?.parse().ok()?;
-                    if flag.ends_with('X') {
-                        x = Some(val);
-                    } else if flag.ends_with('Y') {
-                        y = Some(val);
-                    }
-                }
-                return Some((x?, y?));
-            }
-            prev_was_lf = true;
-        } else if buf[i] == b'\r' {
-            // ignore — CRLF tolerated
-        } else {
-            prev_was_lf = false;
-        }
-        i += 1;
-    }
-    None
 }
 
 struct HdrDemuxer {
@@ -134,6 +99,7 @@ impl Demuxer for HdrDemuxer {
     }
 }
 
+/// Open a muxer that writes the single encoded packet verbatim.
 pub fn open_muxer(output: Box<dyn WriteSeek>, streams: &[StreamInfo]) -> Result<Box<dyn Muxer>> {
     if streams.len() != 1 {
         return Err(Error::invalid(

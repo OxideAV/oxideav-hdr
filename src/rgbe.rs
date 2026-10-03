@@ -778,7 +778,8 @@ mod tests {
             [128, 128, 128, 136],
         ];
         let n = 5;
-        let mut img = crate::HdrImage::from_rgbe_quads(4, 1, &quads, crate::HdrHeader::default());
+        let mut img =
+            crate::HdrImage::from_rgbe_quads(4, 1, &quads, crate::HdrHeader::default()).unwrap();
         assert!(img.adjust_exposure_stops(n));
         let reencoded = img.to_rgbe_quads();
         for (q, r) in quads.iter().zip(reencoded.iter()) {

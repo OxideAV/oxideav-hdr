@@ -28,7 +28,8 @@
 //! framework-free standalone API only.
 
 use libfuzzer_sys::fuzz_target;
-use oxideav_hdr::{encode_hdr, parse_hdr, HdrImage, HdrPixelFormat};
+use oxideav_hdr::{decode, encode, EncodeOptions};
+use oxideav_hdr::{HdrImage, HdrPixelFormat};
 
 fuzz_target!(|data: &[u8]| {
     // Need at least three bytes — two for the dimensions, at least one
@@ -64,9 +65,9 @@ fuzz_target!(|data: &[u8]| {
         pixels.push((f32::from(byte) + 1.0) / 256.0);
     }
 
-    let image = HdrImage::new_rgb96f(width, height, pixels);
+    let image = HdrImage::from_f32(width, height, pixels).unwrap();
 
-    let encoded = match encode_hdr(&image) {
+    let encoded = match encode(&image, &EncodeOptions::default()) {
         Ok(v) => v,
         // The encoder errors only on validation paths (zero dims,
         // pixel-length mismatch) that our construction above can't
@@ -76,13 +77,13 @@ fuzz_target!(|data: &[u8]| {
         Err(_) => return,
     };
 
-    let decoded = parse_hdr(&encoded).expect("encode_hdr output must be parseable by parse_hdr");
+    let decoded = decode(&encoded).expect("encode_hdr output must be parseable by parse_hdr");
 
     assert_eq!(decoded.width, width, "width survives round trip");
     assert_eq!(decoded.height, height, "height survives round trip");
-    assert_eq!(decoded.pixel_format, HdrPixelFormat::Rgb96f);
+    assert_eq!(decoded.format, HdrPixelFormat::RgbF32Le);
     assert_eq!(
-        decoded.pixels.len(),
+        decoded.pixels().len(),
         n,
         "decoded pixel buffer is width × height × 3 floats long",
     );

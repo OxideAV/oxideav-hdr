@@ -24,7 +24,8 @@ use std::borrow::Cow;
 
 use crate::error::{HdrError as Error, Result};
 use crate::header::{AxisSign, HdrHeader};
-use crate::image::{HdrImage, HdrPixelFormat};
+use crate::image::{HdrImage, PixelFormat};
+use crate::options::EncodeOptions;
 use crate::rgbe::rgb_to_rgbe;
 use crate::rle::{encode_scanline, encode_scanline_old_rle, encode_scanline_uncompressed};
 
@@ -172,18 +173,26 @@ pub enum RleMode {
 #[cfg(feature = "registry")]
 use oxideav_core::Encoder;
 #[cfg(feature = "registry")]
-use oxideav_core::{CodecId, CodecParameters, Frame, Packet, PixelFormat, TimeBase};
+use oxideav_core::{CodecId, CodecParameters, Frame, Packet, TimeBase};
 
-/// Factory registered with the codec registry.
+/// Factory registered with the codec registry. The encoder accepts the
+/// native `RgbF32Le` layout as well as `Rgb24` / `Rgba` (converted to
+/// linear float by the raw-path rule, `b / 255`, alpha dropped); the
+/// `rle` / `line_ending` / `exposure` / `software` / `input_gamma`
+/// options follow the [`crate::EncodeOptions`] schema.
 #[cfg(feature = "registry")]
 pub fn make_encoder(params: &CodecParameters) -> oxideav_core::Result<Box<dyn Encoder>> {
     let mut out_params = CodecParameters::video(CodecId::new(crate::CODEC_ID_STR));
     out_params.width = params.width;
     out_params.height = params.height;
     out_params.pixel_format = params.pixel_format;
+    out_params.color_signal = params.color_signal;
+    let options: crate::options::EncodeOptions = oxideav_core::parse_options(&params.options)?;
     Ok(Box::new(HdrEncoder {
         codec_id: CodecId::new(crate::CODEC_ID_STR),
         out_params,
+        in_params: params.clone(),
+        options,
         pending: None,
         eof: false,
     }))
@@ -193,6 +202,8 @@ pub fn make_encoder(params: &CodecParameters) -> oxideav_core::Result<Box<dyn En
 struct HdrEncoder {
     codec_id: CodecId,
     out_params: CodecParameters,
+    in_params: CodecParameters,
+    options: crate::options::EncodeOptions,
     pending: Option<Vec<u8>>,
     eof: bool,
 }
@@ -214,51 +225,8 @@ impl Encoder for HdrEncoder {
                 ))
             }
         };
-        let format = self.out_params.pixel_format.ok_or_else(|| {
-            oxideav_core::Error::invalid("HDR encoder: pixel_format missing in CodecParameters")
-        })?;
-        let width = self.out_params.width.ok_or_else(|| {
-            oxideav_core::Error::invalid("HDR encoder: width missing in CodecParameters")
-        })?;
-        let height = self.out_params.height.ok_or_else(|| {
-            oxideav_core::Error::invalid("HDR encoder: height missing in CodecParameters")
-        })?;
-        if vf.planes.is_empty() {
-            return Err(oxideav_core::Error::invalid(
-                "HDR encoder: empty frame plane",
-            ));
-        }
-        let bytes_per_pixel = match format {
-            PixelFormat::Rgb24 => 3usize,
-            PixelFormat::Rgba => 4,
-            other => {
-                return Err(oxideav_core::Error::invalid(format!(
-                    "HDR encoder: unsupported pixel format {other:?}"
-                )))
-            }
-        };
-        // Convert the LDR plane to f32 in the [0, 1] range so the
-        // shared-exponent encoder has something sensible to compress.
-        let n = (width as usize) * (height as usize);
-        let mut pixels = Vec::with_capacity(n * 3);
-        let stride = vf.planes[0].stride;
-        for y in 0..height as usize {
-            let row = &vf.planes[0].data[y * stride..y * stride + width as usize * bytes_per_pixel];
-            for x in 0..width as usize {
-                let off = x * bytes_per_pixel;
-                pixels.push(row[off] as f32 / 255.0);
-                pixels.push(row[off + 1] as f32 / 255.0);
-                pixels.push(row[off + 2] as f32 / 255.0);
-            }
-        }
-        let img = HdrImage {
-            width,
-            height,
-            pixel_format: HdrPixelFormat::Rgb96f,
-            pixels,
-            header: HdrHeader::default(),
-        };
-        let bytes = encode_hdr(&img)?;
+        let img = HdrImage::from_video_frame(vf, &self.in_params)?;
+        let bytes = encode_image(&img, &self.options)?;
         self.pending = Some(bytes);
         Ok(())
     }
@@ -285,67 +253,89 @@ impl Encoder for HdrEncoder {
 }
 
 // ---------------------------------------------------------------------------
-// Public standalone API
+// Contract implementation (called by the crate-root functions)
 // ---------------------------------------------------------------------------
 
-/// Encode an [`HdrImage`] into a complete HDR file (magic line +
-/// `KEY=VALUE` header + resolution line + new-RLE pixel rows).
-pub fn encode_hdr(image: &HdrImage) -> Result<Vec<u8>> {
-    encode_hdr_with_rle(image, RleMode::New)
+/// Bytes per pixel of the native plane.
+const BPP: usize = 12;
+
+/// The one encode implementation: validate the plane geometry, resolve
+/// the header (image header + [`EncodeOptions`] overrides) and the
+/// magic line, reorient into the on-disk scanline order, quantise to
+/// RGBE and RLE-code.
+pub(crate) fn encode_image(image: &HdrImage, opts: &EncodeOptions) -> Result<Vec<u8>> {
+    let header = resolve_header(image, opts);
+    let magic = match &opts.magic {
+        Some(m) => m.clone(),
+        None => match &header.magic_id {
+            Some(id) => MagicLine::Custom(id.clone()),
+            None => MagicLine::Radiance,
+        },
+    };
+    encode_with_header(image, &header, opts.rle, opts.line_ending, &magic)
 }
 
-/// Like [`encode_hdr`] but with an explicit choice of RLE flavour.
-///
-/// Use [`RleMode::Old`] for outputs targeting consumers that don't
-/// recognise the post-1991 `0x02 0x02 hi lo` scanline marker (very
-/// narrow images that fall outside the new-RLE width range
-/// `8..=32767`, or when matching a legacy fixture exactly).
-pub fn encode_hdr_with_rle(image: &HdrImage, rle: RleMode) -> Result<Vec<u8>> {
-    encode_hdr_with_options(image, rle, LineEnding::Lf)
+/// The image's header with the [`EncodeOptions`] record overrides
+/// applied (borrowed when there are none).
+fn resolve_header<'a>(image: &'a HdrImage, opts: &EncodeOptions) -> Cow<'a, HdrHeader> {
+    if opts.exposure.is_none()
+        && opts.software.is_none()
+        && opts.primaries.is_none()
+        && opts.gamma.is_none()
+    {
+        return Cow::Borrowed(&image.header);
+    }
+    let mut h = image.header.clone();
+    if let Some(e) = opts.exposure {
+        h.exposure = Some(e);
+    }
+    if let Some(s) = &opts.software {
+        h.software = Some(s.clone());
+    }
+    if let Some(p) = opts.primaries {
+        h.primaries = Some(p);
+    }
+    if let Some(g) = opts.gamma {
+        h.gamma = Some(g);
+    }
+    Cow::Owned(h)
 }
 
-/// Full-control encode: pick the RLE flavour and the text-line
-/// terminator independently.
-///
-/// The pixel payload following the resolution line is identical to
-/// what [`encode_hdr_with_rle`] would produce — only the bytes of the
-/// magic line, KEY=VALUE records, header terminator and resolution
-/// line change between `LineEnding::Lf` and `LineEnding::Crlf`.
-///
-/// The magic line is fixed at [`MagicLine::Radiance`] (`#?RADIANCE`);
-/// callers that need to emit the legacy [`MagicLine::Rgbe`] (`#?RGBE`)
-/// form should use [`encode_hdr_with_full_options`] instead.
-pub fn encode_hdr_with_options(
+fn encode_with_header(
     image: &HdrImage,
+    header: &HdrHeader,
     rle: RleMode,
     line_ending: LineEnding,
-) -> Result<Vec<u8>> {
-    encode_hdr_with_full_options(image, rle, line_ending, MagicLine::Radiance)
-}
-
-/// Maximum-control encode: pick the RLE flavour, the text-line
-/// terminator and the magic-line spelling independently.
-///
-/// The staged spec documents `#?RADIANCE` and `#?RGBE` as equivalent
-/// identifiers; this entry point lets callers pick which one their
-/// downstream consumer expects. The pixel payload, header records and
-/// resolution line are identical to what [`encode_hdr_with_options`]
-/// would produce — only the first line of the file changes.
-pub fn encode_hdr_with_full_options(
-    image: &HdrImage,
-    rle: RleMode,
-    line_ending: LineEnding,
-    magic: MagicLine,
+    magic: &MagicLine,
 ) -> Result<Vec<u8>> {
     let w = image.width as usize;
     let h = image.height as usize;
-    if image.pixels.len() != w * h * 3 {
-        return Err(Error::invalid(
-            "HDR encoder: pixels length doesn't match width*height*3",
-        ));
-    }
     if w == 0 || h == 0 {
         return Err(Error::invalid("HDR encoder: zero dimension"));
+    }
+    // Images built through the constructors are geometry-checked; the
+    // fields are public, so re-validate before indexing the plane.
+    let plane = image
+        .planes
+        .first()
+        .ok_or_else(|| Error::invalid("HDR encoder: image has no pixel plane"))?;
+    if image.planes.len() != 1 || image.format != PixelFormat::RgbF32Le {
+        return Err(Error::unsupported(
+            "HDR encoder: expected exactly one RgbF32Le plane",
+        ));
+    }
+    let row = w
+        .checked_mul(BPP)
+        .ok_or_else(|| Error::unsupported("HDR encoder: row size overflows usize"))?;
+    let needed = plane
+        .stride
+        .checked_mul(h - 1)
+        .and_then(|n| n.checked_add(row))
+        .ok_or_else(|| Error::unsupported("HDR encoder: plane size overflows usize"))?;
+    if plane.stride < row || plane.data.len() < needed {
+        return Err(Error::invalid(
+            "HDR encoder: pixel plane shorter than width*height*12",
+        ));
     }
     // Reorder the canonical top-down (y, x) buffer into the layout
     // implied by the header's axis-sign flags before encoding. The
@@ -357,18 +347,14 @@ pub fn encode_hdr_with_full_options(
     // horizontal mirror per the sign flags. For X-first headers
     // (`±X W ±Y H`) each on-disk "scanline" is actually a column of the
     // canonical buffer, so we transpose into (x, y) order first; the
-    // on-disk width then becomes `height` (the height-many original
-    // rows, now laid out one per output sample) and the on-disk height
+    // on-disk width then becomes `height` and the on-disk height
     // becomes `width`. The axis-sign flips apply after the transpose.
     //
-    // Fast path: on the canonical `-Y H +X W` header (the overwhelmingly
-    // common case — encoder default) `reorient_for_axis_flags` returns
-    // a `Cow::Borrowed(&image.pixels)` so the previous round-131
-    // unconditional `pixels.to_vec()` (~12 MiB alloc/memcpy per
-    // 1024×1024 default-axis encode) is gone. Mirrored / transposed
-    // headers still pay the allocation since the on-disk layout
-    // genuinely differs from the canonical buffer.
-    let (out_w, out_h, oriented) = reorient_for_axis_flags(&image.pixels, w, h, &image.header);
+    // Fast path: on the canonical `-Y H +X W` header with a tightly
+    // packed plane `reorient_for_axis_flags` borrows the plane bytes,
+    // so the default-axis encode performs no pixel copy.
+    let (out_w, out_h, oriented) =
+        reorient_for_axis_flags(&plane.data[..needed], plane.stride, w, h, header);
     // The new-RLE marker addresses the *on-disk* scanline width, which
     // differs from the canonical image width for X-first headers — apply
     // the auto/strict check against `out_w` rather than `w`.
@@ -388,51 +374,109 @@ pub fn encode_hdr_with_full_options(
         )));
     }
     let mut out = Vec::with_capacity(32 + out_w * out_h * 4);
-    write_header(&mut out, &image.header, line_ending, &magic);
-    write_resolution(&mut out, out_w, out_h, &image.header, line_ending);
+    write_header(&mut out, header, line_ending, magic);
+    write_resolution(&mut out, out_w, out_h, header, line_ending);
     write_pixel_rows(&mut out, out_w, out_h, &oriented, effective_rle)?;
     Ok(out)
 }
 
+// ---------------------------------------------------------------------------
+// Pre-contract entry points (deprecated wrappers, one release)
+// ---------------------------------------------------------------------------
+
+/// Encode with new-RLE scanlines, LF line endings and the `#?RADIANCE`
+/// magic line.
+#[deprecated(note = "use oxideav_hdr::encode (IMAGE_CRATE_API)")]
+pub fn encode_hdr(image: &HdrImage) -> Result<Vec<u8>> {
+    encode_image(
+        image,
+        &EncodeOptions::default()
+            .with_rle(RleMode::New)
+            .with_magic(MagicLine::Radiance),
+    )
+}
+
+/// [`encode_hdr`] with an explicit RLE flavour.
+#[deprecated(note = "use oxideav_hdr::encode with EncodeOptions::with_rle (IMAGE_CRATE_API)")]
+pub fn encode_hdr_with_rle(image: &HdrImage, rle: RleMode) -> Result<Vec<u8>> {
+    encode_image(
+        image,
+        &EncodeOptions::default()
+            .with_rle(rle)
+            .with_magic(MagicLine::Radiance),
+    )
+}
+
+/// [`encode_hdr`] with the RLE flavour and line terminator chosen.
+#[deprecated(note = "use oxideav_hdr::encode with EncodeOptions fields (IMAGE_CRATE_API)")]
+pub fn encode_hdr_with_options(
+    image: &HdrImage,
+    rle: RleMode,
+    line_ending: LineEnding,
+) -> Result<Vec<u8>> {
+    encode_image(
+        image,
+        &EncodeOptions::default()
+            .with_rle(rle)
+            .with_line_ending(line_ending)
+            .with_magic(MagicLine::Radiance),
+    )
+}
+
+/// [`encode_hdr`] with the RLE flavour, line terminator and magic line
+/// chosen.
+#[deprecated(note = "use oxideav_hdr::encode with EncodeOptions fields (IMAGE_CRATE_API)")]
+pub fn encode_hdr_with_full_options(
+    image: &HdrImage,
+    rle: RleMode,
+    line_ending: LineEnding,
+    magic: MagicLine,
+) -> Result<Vec<u8>> {
+    encode_image(
+        image,
+        &EncodeOptions::default()
+            .with_rle(rle)
+            .with_line_ending(line_ending)
+            .with_magic(magic),
+    )
+}
+
 /// Encode preserving the magic-line identifier the decoder parsed into
-/// [`HdrHeader::magic_id`](crate::HdrHeader::magic_id), so a
-/// decode→encode round-trip reproduces the original `#?…` line verbatim
-/// rather than rewriting every file's identifier to `#?RADIANCE`.
-///
-/// When `image.header.magic_id` is `Some(id)` the file leads with
-/// `#?<id>`; when it is `None` (a freshly-built [`HdrImage`] that never
-/// came off disk) the encoder falls back to [`MagicLine::Radiance`], the
-/// same default [`encode_hdr_with_options`] uses. The RLE flavour and
-/// line ending are caller-chosen exactly as in
-/// [`encode_hdr_with_options`].
+/// [`HdrHeader::magic_id`] (the default behaviour of [`crate::encode`]).
+#[deprecated(
+    note = "use oxideav_hdr::encode — EncodeOptions::magic = None preserves the identifier (IMAGE_CRATE_API)"
+)]
 pub fn encode_hdr_preserving_magic(
     image: &HdrImage,
     rle: RleMode,
     line_ending: LineEnding,
 ) -> Result<Vec<u8>> {
-    let magic = match &image.header.magic_id {
-        Some(id) => MagicLine::Custom(id.clone()),
-        None => MagicLine::Radiance,
-    };
-    encode_hdr_with_full_options(image, rle, line_ending, magic)
+    encode_image(
+        image,
+        &EncodeOptions::default()
+            .with_rle(rle)
+            .with_line_ending(line_ending),
+    )
 }
 
-/// Convenience wrapper that builds an [`HdrImage`] from raw float
-/// data and the supplied header, then defers to [`encode_hdr`].
+/// Build an [`HdrImage`] from raw float data and the supplied header,
+/// then encode it as [`encode_hdr`] would.
+#[deprecated(
+    note = "use HdrImage::from_f32(..)?.with_header(..) + oxideav_hdr::encode (IMAGE_CRATE_API)"
+)]
 pub fn encode_hdr_rgb96f(
     width: u32,
     height: u32,
     pixels: Vec<f32>,
     header: HdrHeader,
 ) -> Result<Vec<u8>> {
-    let img = HdrImage {
-        width,
-        height,
-        pixel_format: HdrPixelFormat::Rgb96f,
-        pixels,
-        header,
-    };
-    encode_hdr(&img)
+    let img = HdrImage::from_f32(width, height, pixels)?.with_header(header);
+    encode_image(
+        &img,
+        &EncodeOptions::default()
+            .with_rle(RleMode::New)
+            .with_magic(MagicLine::Radiance),
+    )
 }
 
 fn write_header(out: &mut Vec<u8>, header: &HdrHeader, eol: LineEnding, magic: &MagicLine) {
@@ -533,16 +577,35 @@ fn write_resolution(
 /// transpose) — returns the caller's buffer as a `Cow::Borrowed`,
 /// skipping the ~12 MiB alloc/memcpy that would otherwise dominate a
 /// 1024×1024 default-axis encode. Mirrored / transposed cases still
-/// produce an owned reordering since the on-disk layout genuinely
-/// differs from the canonical buffer.
+/// Reorder a canonical top-down `(y, x)` row-major plane (12-byte
+/// little-endian float pixels, `stride` bytes per row) into the on-disk
+/// layout implied by `header.y_sign` / `header.x_sign` /
+/// `header.x_first`.
+///
+/// Returns `(out_width, out_height, oriented_pixels)` with the oriented
+/// buffer tightly packed. For Y-first headers the returned width/height
+/// match the input; for X-first headers they are swapped (each on-disk
+/// scanline is one column of the canonical buffer).
+///
+/// The fast path — the canonical `-Y H +X W` default (no flip, no
+/// transpose) on a tightly packed plane — returns the caller's buffer
+/// as a `Cow::Borrowed`, skipping the ~12 MiB alloc/memcpy that would
+/// otherwise dominate a 1024×1024 default-axis encode. Mirrored /
+/// transposed / padded cases produce an owned reordering.
 fn reorient_for_axis_flags<'a>(
-    pixels: &'a [f32],
+    plane: &'a [u8],
+    stride: usize,
     width: usize,
     height: usize,
     header: &HdrHeader,
-) -> (usize, usize, Cow<'a, [f32]>) {
+) -> (usize, usize, Cow<'a, [u8]>) {
     let flip_y = header.y_sign == AxisSign::Increasing;
     let flip_x = header.x_sign == AxisSign::Decreasing;
+    let row = width * BPP;
+    let src_px = |x: usize, y: usize| -> &'a [u8] {
+        let off = y * stride + x * BPP;
+        &plane[off..off + BPP]
+    };
 
     if header.x_first {
         // Transpose into (x, y) row-major: each output row is a column
@@ -551,7 +614,7 @@ fn reorient_for_axis_flags<'a>(
         // on-disk height is the canonical `width`.
         let out_w = height;
         let out_h = width;
-        let mut m = vec![0.0_f32; pixels.len()];
+        let mut m = vec![0u8; width * height * BPP];
         for ox in 0..width {
             // `ox` is the canonical X column which becomes output row.
             // Apply the X sign flip on the source-X side: if `flip_x`
@@ -561,41 +624,45 @@ fn reorient_for_axis_flags<'a>(
             for oy in 0..height {
                 // `oy` is the canonical Y row which becomes output col.
                 let src_y = if flip_y { height - 1 - oy } else { oy };
-                let src = (src_y * width + src_x) * 3;
-                let dst = (ox * out_w + oy) * 3;
-                m[dst] = pixels[src];
-                m[dst + 1] = pixels[src + 1];
-                m[dst + 2] = pixels[src + 2];
+                let dst = (ox * out_w + oy) * BPP;
+                m[dst..dst + BPP].copy_from_slice(src_px(src_x, src_y));
             }
         }
         return (out_w, out_h, Cow::Owned(m));
     }
 
     if !flip_x && !flip_y {
-        // Canonical orientation — no reordering needed, hand the
-        // caller's buffer back unmodified.
-        return (width, height, Cow::Borrowed(pixels));
+        if stride == row && plane.len() == row * height {
+            // Canonical orientation, tight plane — hand the caller's
+            // buffer back unmodified.
+            return (width, height, Cow::Borrowed(plane));
+        }
+        // Canonical orientation with row padding: repack tightly.
+        let mut m = Vec::with_capacity(row * height);
+        for y in 0..height {
+            m.extend_from_slice(&plane[y * stride..y * stride + row]);
+        }
+        return (width, height, Cow::Owned(m));
     }
-    let mut m = vec![0.0_f32; pixels.len()];
+    let mut m = vec![0u8; row * height];
     for y in 0..height {
         let src_y = if flip_y { height - 1 - y } else { y };
         for x in 0..width {
             let src_x = if flip_x { width - 1 - x } else { x };
-            let src = (src_y * width + src_x) * 3;
-            let dst = (y * width + x) * 3;
-            m[dst] = pixels[src];
-            m[dst + 1] = pixels[src + 1];
-            m[dst + 2] = pixels[src + 2];
+            let dst = y * row + x * BPP;
+            m[dst..dst + BPP].copy_from_slice(src_px(src_x, src_y));
         }
     }
     (width, height, Cow::Owned(m))
 }
 
+/// Quantise `height` rows of `width` little-endian float pixels to RGBE
+/// and RLE-code them.
 fn write_pixel_rows(
     out: &mut Vec<u8>,
     width: usize,
     height: usize,
-    pixels: &[f32],
+    pixels: &[u8],
     rle: RleMode,
 ) -> Result<()> {
     // For each scanline, build the four channel buffers from the
@@ -606,10 +673,15 @@ fn write_pixel_rows(
         vec![0u8; width],
         vec![0u8; width],
     ];
+    let row_len = width * BPP;
     for y in 0..height {
-        let row = &pixels[y * width * 3..(y + 1) * width * 3];
-        for (x, px) in row.chunks_exact(3).enumerate() {
-            let rgbe = rgb_to_rgbe([px[0], px[1], px[2]]);
+        let row = &pixels[y * row_len..(y + 1) * row_len];
+        for (x, px) in row.chunks_exact(BPP).enumerate() {
+            let rgbe = rgb_to_rgbe([
+                f32::from_le_bytes([px[0], px[1], px[2], px[3]]),
+                f32::from_le_bytes([px[4], px[5], px[6], px[7]]),
+                f32::from_le_bytes([px[8], px[9], px[10], px[11]]),
+            ]);
             channels[0][x] = rgbe[0];
             channels[1][x] = rgbe[1];
             channels[2][x] = rgbe[2];
@@ -658,7 +730,7 @@ fn write_pixel_rows(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::decoder::parse_hdr;
+    use crate::{decode, decode_with, encode, DecodeOptions};
 
     fn pattern(w: u32, h: u32) -> HdrImage {
         let mut pixels = Vec::with_capacity((w * h * 3) as usize);
@@ -667,14 +739,20 @@ mod tests {
             pixels.push((i as f32 + 1.0) * 0.005);
             pixels.push((i as f32 + 1.0) * 0.002);
         }
-        HdrImage::new_rgb96f(w, h, pixels)
+        HdrImage::from_f32(w, h, pixels).unwrap()
     }
 
     #[test]
     fn crlf_encoder_terminates_every_text_line_with_crlf() {
         // 16-wide so the new-RLE path fires.
         let img = pattern(16, 4);
-        let bytes = encode_hdr_with_options(&img, RleMode::New, LineEnding::Crlf).unwrap();
+        let bytes = encode(
+            &img,
+            &EncodeOptions::default()
+                .with_rle(RleMode::New)
+                .with_line_ending(LineEnding::Crlf),
+        )
+        .unwrap();
         // The magic, FORMAT line, blank-line terminator and resolution
         // line must all end in `\r\n`.
         assert!(bytes.starts_with(b"#?RADIANCE\r\n"));
@@ -701,7 +779,7 @@ mod tests {
             "unexpected resolution-line orientation: {resline:?}",
         );
         // Roundtrip through the decoder (which already strips `\r`).
-        let back = parse_hdr(&bytes).unwrap();
+        let back = decode(&bytes).unwrap();
         assert_eq!(back.width, 16);
         assert_eq!(back.height, 4);
     }
@@ -711,7 +789,13 @@ mod tests {
         // Confirm the default LF path doesn't accidentally pick up a
         // `\r` anywhere in the text section.
         let img = pattern(16, 2);
-        let bytes = encode_hdr_with_options(&img, RleMode::New, LineEnding::Lf).unwrap();
+        let bytes = encode(
+            &img,
+            &EncodeOptions::default()
+                .with_rle(RleMode::New)
+                .with_line_ending(LineEnding::Lf),
+        )
+        .unwrap();
         // Locate the LF blank-line terminator.
         let blank_pos = bytes
             .windows(2)
@@ -735,14 +819,14 @@ mod tests {
     fn view_record_round_trips_through_encoder_and_decoder() {
         let mut img = pattern(16, 2);
         img.header.view = Some("rvu -vp 0 0 10 -vd 0 0 -1 -vu 0 1 0".to_owned());
-        let bytes = encode_hdr(&img).unwrap();
+        let bytes = encode(&img, &EncodeOptions::default()).unwrap();
         let head_end = bytes.windows(2).position(|w| w == b"\n\n").unwrap();
         let head = std::str::from_utf8(&bytes[..head_end]).unwrap();
         assert!(
             head.contains("VIEW=rvu -vp 0 0 10 -vd 0 0 -1 -vu 0 1 0"),
             "VIEW record missing from header: {head:?}",
         );
-        let back = parse_hdr(&bytes).unwrap();
+        let back = decode(&bytes).unwrap();
         assert_eq!(
             back.header.view.as_deref(),
             Some("rvu -vp 0 0 10 -vd 0 0 -1 -vu 0 1 0")
@@ -758,8 +842,10 @@ mod tests {
         // about; if a future change reintroduces an unconditional
         // `to_vec()` this test catches it.
         let img = pattern(16, 4);
+        let plane = img.as_bytes().unwrap();
         let (out_w, out_h, oriented) = reorient_for_axis_flags(
-            &img.pixels,
+            plane,
+            img.stride(),
             img.width as usize,
             img.height as usize,
             &img.header,
@@ -768,9 +854,9 @@ mod tests {
         assert_eq!(out_h, img.height as usize);
         assert!(matches!(oriented, Cow::Borrowed(_)));
         // Identity of the borrow: same ptr + same length means the
-        // encoder will read straight out of the caller's `Vec<f32>`.
-        let canon_ptr = img.pixels.as_ptr();
-        let canon_len = img.pixels.len();
+        // encoder will read straight out of the caller's plane.
+        let canon_ptr = plane.as_ptr();
+        let canon_len = plane.len();
         let oriented_ptr = oriented.as_ptr();
         let oriented_len = oriented.len();
         assert_eq!(canon_ptr, oriented_ptr);
@@ -787,14 +873,15 @@ mod tests {
         let mut img = pattern(16, 4);
         img.header.y_sign = AxisSign::Increasing;
         let (_out_w, _out_h, oriented) = reorient_for_axis_flags(
-            &img.pixels,
+            img.as_bytes().unwrap(),
+            img.stride(),
             img.width as usize,
             img.height as usize,
             &img.header,
         );
         assert!(matches!(oriented, Cow::Owned(_)));
-        let bytes = encode_hdr(&img).unwrap();
-        let back = parse_hdr(&bytes).unwrap();
+        let bytes = encode(&img, &EncodeOptions::default()).unwrap();
+        let back = decode(&bytes).unwrap();
         assert_eq!(back.width, img.width);
         assert_eq!(back.height, img.height);
         assert_eq!(back.header.y_sign, AxisSign::Increasing);
@@ -802,8 +889,8 @@ mod tests {
         for y in 0..img.height as usize {
             for x in 0..img.width as usize {
                 let i = (y * img.width as usize + x) * 3;
-                let a = img.pixels[i];
-                let b = back.pixels[i];
+                let a = img.pixels()[i];
+                let b = back.pixels()[i];
                 let err = (a - b).abs();
                 assert!(err < 0.02, "mirror y={y} x={x}: {a} vs {b}");
             }
@@ -817,11 +904,23 @@ mod tests {
         // future refactor that introduces a typo or changes the casing
         // is caught immediately.
         let img = pattern(16, 2);
-        let bytes = encode_hdr(&img).unwrap();
+        let bytes = encode(&img, &EncodeOptions::default()).unwrap();
         assert!(bytes.starts_with(b"#?RADIANCE\n"));
-        let bytes = encode_hdr_with_options(&img, RleMode::New, LineEnding::Lf).unwrap();
+        let bytes = encode(
+            &img,
+            &EncodeOptions::default()
+                .with_rle(RleMode::New)
+                .with_line_ending(LineEnding::Lf),
+        )
+        .unwrap();
         assert!(bytes.starts_with(b"#?RADIANCE\n"));
-        let bytes = encode_hdr_with_options(&img, RleMode::New, LineEnding::Crlf).unwrap();
+        let bytes = encode(
+            &img,
+            &EncodeOptions::default()
+                .with_rle(RleMode::New)
+                .with_line_ending(LineEnding::Crlf),
+        )
+        .unwrap();
         assert!(bytes.starts_with(b"#?RADIANCE\r\n"));
     }
 
@@ -832,10 +931,21 @@ mod tests {
         // documented default). Any deviation indicates the new entry
         // point unintentionally changed the canonical wire image.
         let img = pattern(16, 2);
-        let canonical = encode_hdr_with_options(&img, RleMode::New, LineEnding::Lf).unwrap();
-        let via_full =
-            encode_hdr_with_full_options(&img, RleMode::New, LineEnding::Lf, MagicLine::Radiance)
-                .unwrap();
+        let canonical = encode(
+            &img,
+            &EncodeOptions::default()
+                .with_rle(RleMode::New)
+                .with_line_ending(LineEnding::Lf),
+        )
+        .unwrap();
+        let via_full = encode(
+            &img,
+            &EncodeOptions::default()
+                .with_rle(RleMode::New)
+                .with_line_ending(LineEnding::Lf)
+                .with_magic(MagicLine::Radiance),
+        )
+        .unwrap();
         assert_eq!(canonical, via_full);
     }
 
@@ -848,12 +958,22 @@ mod tests {
         // payload) must be identical to the `MagicLine::Radiance`
         // output, and the decoder must accept the result.
         let img = pattern(16, 2);
-        let radiance =
-            encode_hdr_with_full_options(&img, RleMode::New, LineEnding::Lf, MagicLine::Radiance)
-                .unwrap();
-        let rgbe =
-            encode_hdr_with_full_options(&img, RleMode::New, LineEnding::Lf, MagicLine::Rgbe)
-                .unwrap();
+        let radiance = encode(
+            &img,
+            &EncodeOptions::default()
+                .with_rle(RleMode::New)
+                .with_line_ending(LineEnding::Lf)
+                .with_magic(MagicLine::Radiance),
+        )
+        .unwrap();
+        let rgbe = encode(
+            &img,
+            &EncodeOptions::default()
+                .with_rle(RleMode::New)
+                .with_line_ending(LineEnding::Lf)
+                .with_magic(MagicLine::Rgbe),
+        )
+        .unwrap();
         assert!(rgbe.starts_with(b"#?RGBE\n"));
         assert!(radiance.starts_with(b"#?RADIANCE\n"));
         // Length differs by exactly `len("#?RADIANCE") - len("#?RGBE") = 4`.
@@ -864,7 +984,7 @@ mod tests {
         assert_eq!(radiance_after, rgbe_after);
         // The decoder accepts both spellings — round-trip the legacy
         // file end-to-end so the pixel buffer survives.
-        let back = parse_hdr(&rgbe).unwrap();
+        let back = decode(&rgbe).unwrap();
         assert_eq!(back.width, img.width);
         assert_eq!(back.height, img.height);
     }
@@ -876,12 +996,17 @@ mod tests {
         // the identifier with `\r\n`, matching the rest of the text
         // section.
         let img = pattern(16, 2);
-        let bytes =
-            encode_hdr_with_full_options(&img, RleMode::New, LineEnding::Crlf, MagicLine::Rgbe)
-                .unwrap();
+        let bytes = encode(
+            &img,
+            &EncodeOptions::default()
+                .with_rle(RleMode::New)
+                .with_line_ending(LineEnding::Crlf)
+                .with_magic(MagicLine::Rgbe),
+        )
+        .unwrap();
         assert!(bytes.starts_with(b"#?RGBE\r\n"));
         // Round-trip through the decoder.
-        let back = parse_hdr(&bytes).unwrap();
+        let back = decode(&bytes).unwrap();
         assert_eq!(back.width, 16);
         assert_eq!(back.height, 2);
     }
@@ -896,11 +1021,16 @@ mod tests {
         img.header.gamma = Some(2.2);
         img.header.colorcorr = Some([1.0, 0.95, 0.9]);
         img.header.software = Some("oxideav-hdr/rgbe-magic".to_owned());
-        let bytes =
-            encode_hdr_with_full_options(&img, RleMode::New, LineEnding::Lf, MagicLine::Rgbe)
-                .unwrap();
+        let bytes = encode(
+            &img,
+            &EncodeOptions::default()
+                .with_rle(RleMode::New)
+                .with_line_ending(LineEnding::Lf)
+                .with_magic(MagicLine::Rgbe),
+        )
+        .unwrap();
         assert!(bytes.starts_with(b"#?RGBE\n"));
-        let back = parse_hdr(&bytes).unwrap();
+        let back = decode(&bytes).unwrap();
         assert_eq!(back.header.exposure, Some(1.5));
         assert_eq!(back.header.gamma, Some(2.2));
         assert_eq!(back.header.colorcorr, Some([1.0, 0.95, 0.9]));
@@ -920,7 +1050,13 @@ mod tests {
             "oconv scene.rad > scene.oct".to_owned(),
             "rpict -vp 0 0 0 scene.oct".to_owned(),
         ];
-        let bytes = encode_hdr_with_options(&img, RleMode::New, LineEnding::Lf).unwrap();
+        let bytes = encode(
+            &img,
+            &EncodeOptions::default()
+                .with_rle(RleMode::New)
+                .with_line_ending(LineEnding::Lf),
+        )
+        .unwrap();
         // Command lines lead the header, ahead of FORMAT.
         let head = String::from_utf8_lossy(&bytes);
         let body = head.strip_prefix("#?RADIANCE\n").unwrap();
@@ -928,7 +1064,7 @@ mod tests {
             body.starts_with("oconv scene.rad > scene.oct\nrpict -vp 0 0 0 scene.oct\nFORMAT="),
             "command lines not emitted ahead of FORMAT: {body:?}",
         );
-        let back = parse_hdr(&bytes).unwrap();
+        let back = decode(&bytes).unwrap();
         assert_eq!(
             back.header.commands,
             vec!["oconv scene.rad > scene.oct", "rpict -vp 0 0 0 scene.oct"]
@@ -939,11 +1075,17 @@ mod tests {
     fn command_lines_round_trip_under_crlf() {
         let mut img = pattern(16, 2);
         img.header.commands = vec!["rpict scene.oct".to_owned()];
-        let bytes = encode_hdr_with_options(&img, RleMode::New, LineEnding::Crlf).unwrap();
+        let bytes = encode(
+            &img,
+            &EncodeOptions::default()
+                .with_rle(RleMode::New)
+                .with_line_ending(LineEnding::Crlf),
+        )
+        .unwrap();
         assert!(bytes
             .windows(b"#?RADIANCE\r\nrpict scene.oct\r\n".len())
             .any(|w| w == b"#?RADIANCE\r\nrpict scene.oct\r\n"));
-        let back = parse_hdr(&bytes).unwrap();
+        let back = decode(&bytes).unwrap();
         assert_eq!(back.header.commands, vec!["rpict scene.oct"]);
     }
 
@@ -958,8 +1100,14 @@ mod tests {
         img.header.view = Some("rvu -vp 0 0 5".to_owned());
         img.header.colorcorr = Some([1.1, 1.0, 0.9]);
         img.header.pixaspect = Some(1.0);
-        let bytes = encode_hdr_with_options(&img, RleMode::New, LineEnding::Crlf).unwrap();
-        let back = parse_hdr(&bytes).unwrap();
+        let bytes = encode(
+            &img,
+            &EncodeOptions::default()
+                .with_rle(RleMode::New)
+                .with_line_ending(LineEnding::Crlf),
+        )
+        .unwrap();
+        let back = decode(&bytes).unwrap();
         assert_eq!(back.header.exposure, Some(2.0));
         assert_eq!(back.header.gamma, Some(1.0));
         assert_eq!(back.header.software.as_deref(), Some("oxideav-hdr/crlf"));
@@ -974,15 +1122,16 @@ mod tests {
         // identifier verbatim, and the result decodes — covering writers
         // that stamp their own program name in the magic line.
         let img = pattern(16, 2);
-        let bytes = encode_hdr_with_full_options(
+        let bytes = encode(
             &img,
-            RleMode::New,
-            LineEnding::Lf,
-            MagicLine::Custom("MYWRITER 1.2".to_owned()),
+            &EncodeOptions::default()
+                .with_rle(RleMode::New)
+                .with_line_ending(LineEnding::Lf)
+                .with_magic(MagicLine::Custom("MYWRITER 1.2".to_owned())),
         )
         .unwrap();
         assert!(bytes.starts_with(b"#?MYWRITER 1.2\n"));
-        let back = parse_hdr(&bytes).unwrap();
+        let back = decode(&bytes).unwrap();
         assert_eq!(back.header.magic_id.as_deref(), Some("MYWRITER 1.2"));
     }
 
@@ -992,14 +1141,20 @@ mod tests {
         // named `MagicLine::Radiance` — the named variants are just
         // shorthands for the common identifiers.
         let img = pattern(16, 2);
-        let named =
-            encode_hdr_with_full_options(&img, RleMode::New, LineEnding::Lf, MagicLine::Radiance)
-                .unwrap();
-        let custom = encode_hdr_with_full_options(
+        let named = encode(
             &img,
-            RleMode::New,
-            LineEnding::Lf,
-            MagicLine::Custom("RADIANCE".to_owned()),
+            &EncodeOptions::default()
+                .with_rle(RleMode::New)
+                .with_line_ending(LineEnding::Lf)
+                .with_magic(MagicLine::Radiance),
+        )
+        .unwrap();
+        let custom = encode(
+            &img,
+            &EncodeOptions::default()
+                .with_rle(RleMode::New)
+                .with_line_ending(LineEnding::Lf)
+                .with_magic(MagicLine::Custom("RADIANCE".to_owned())),
         )
         .unwrap();
         assert_eq!(named, custom);
@@ -1015,18 +1170,29 @@ mod tests {
         // Append a flat uncompressed pixel section so the decode succeeds.
         let mut file = original.clone();
         file.extend(std::iter::repeat(0u8).take(16 * 2 * 4));
-        let decoded =
-            crate::parse_hdr_with_options(&file, crate::FallbackMode::Uncompressed).unwrap();
+        let decoded = crate::decode_with(
+            &file,
+            &crate::DecodeOptions::default().with_fallback(crate::FallbackMode::Uncompressed),
+        )
+        .unwrap();
         assert_eq!(
             decoded.header.magic_id.as_deref(),
             Some("SOMEOTHERWRITER v3")
         );
-        let reencoded =
-            encode_hdr_preserving_magic(&decoded, RleMode::Uncompressed, LineEnding::Lf).unwrap();
+        let reencoded = encode(
+            &decoded,
+            &EncodeOptions::default()
+                .with_rle(RleMode::Uncompressed)
+                .with_line_ending(LineEnding::Lf),
+        )
+        .unwrap();
         assert!(reencoded.starts_with(b"#?SOMEOTHERWRITER v3\n"));
         // And the identifier survives a second decode round.
-        let twice =
-            crate::parse_hdr_with_options(&reencoded, crate::FallbackMode::Uncompressed).unwrap();
+        let twice = crate::decode_with(
+            &reencoded,
+            &crate::DecodeOptions::default().with_fallback(crate::FallbackMode::Uncompressed),
+        )
+        .unwrap();
         assert_eq!(twice.header.magic_id.as_deref(), Some("SOMEOTHERWRITER v3"));
     }
 
@@ -1054,8 +1220,9 @@ mod tests {
             // Auto picks new-RLE when the on-disk scanline width is in
             // range (8 for Y-first, 4 for X-first → old-RLE), so the
             // encoder never errors on the narrow transposed scanline.
-            let bytes = encode_hdr_with_rle(&oriented, RleMode::Auto).unwrap();
-            let back = parse_hdr(&bytes).unwrap();
+            let bytes =
+                encode(&oriented, &EncodeOptions::default().with_rle(RleMode::Auto)).unwrap();
+            let back = decode(&bytes).unwrap();
             // Decoder always returns the canonical top-down (y, x)
             // buffer regardless of on-disk orientation, so the recovered
             // image must match the original canonical buffer for every
@@ -1063,9 +1230,9 @@ mod tests {
             assert_eq!(back.width, img.width, "{o:?}: width");
             assert_eq!(back.height, img.height, "{o:?}: height");
             assert_eq!(back.header.orientation(), o, "{o:?}: orientation slot");
-            for i in 0..img.pixels.len() {
-                let a = img.pixels[i];
-                let b = back.pixels[i];
+            for i in 0..img.pixels().len() {
+                let a = img.pixels()[i];
+                let b = back.pixels()[i];
                 assert!((a - b).abs() < 0.02, "{o:?}: pixel {i}: {a} vs {b}",);
             }
         }
@@ -1078,7 +1245,13 @@ mod tests {
         // canonical `#?RADIANCE` default.
         let img = pattern(16, 2);
         assert!(img.header.magic_id.is_none());
-        let bytes = encode_hdr_preserving_magic(&img, RleMode::New, LineEnding::Lf).unwrap();
+        let bytes = encode(
+            &img,
+            &EncodeOptions::default()
+                .with_rle(RleMode::New)
+                .with_line_ending(LineEnding::Lf),
+        )
+        .unwrap();
         assert!(bytes.starts_with(b"#?RADIANCE\n"));
     }
 
@@ -1095,7 +1268,7 @@ mod tests {
                 pixels.push(0.25 + m / 65536.0);
             }
         }
-        HdrImage::new_rgb96f(w, h, pixels)
+        HdrImage::from_f32(w, h, pixels).unwrap()
     }
 
     #[test]
@@ -1103,11 +1276,9 @@ mod tests {
         // A solid picture compresses heavily under new-RLE, so the
         // Smallest output must be byte-identical to the pure New mode.
         let mut img = pattern(16, 4);
-        for px in img.pixels.iter_mut() {
-            *px = 0.5;
-        }
-        let smallest = encode_hdr_with_rle(&img, RleMode::Smallest).unwrap();
-        let new = encode_hdr_with_rle(&img, RleMode::New).unwrap();
+        img.map_samples(|_| 0.5);
+        let smallest = encode(&img, &EncodeOptions::default().with_rle(RleMode::Smallest)).unwrap();
+        let new = encode(&img, &EncodeOptions::default().with_rle(RleMode::New)).unwrap();
         assert_eq!(smallest, new);
     }
 
@@ -1117,9 +1288,13 @@ mod tests {
         // literal-header bytes plus the 4-byte marker — larger than the
         // flat 4*width form — so Smallest must emit the flat scanlines.
         let img = noisy(32, 4);
-        let smallest = encode_hdr_with_rle(&img, RleMode::Smallest).unwrap();
-        let flat = encode_hdr_with_rle(&img, RleMode::Uncompressed).unwrap();
-        let new = encode_hdr_with_rle(&img, RleMode::New).unwrap();
+        let smallest = encode(&img, &EncodeOptions::default().with_rle(RleMode::Smallest)).unwrap();
+        let flat = encode(
+            &img,
+            &EncodeOptions::default().with_rle(RleMode::Uncompressed),
+        )
+        .unwrap();
+        let new = encode(&img, &EncodeOptions::default().with_rle(RleMode::New)).unwrap();
         assert_eq!(smallest, flat);
         assert!(
             smallest.len() < new.len(),
@@ -1134,9 +1309,14 @@ mod tests {
         // The per-scanline minimum can only improve on both whole-file
         // pure modes (header/resolution bytes are identical).
         for img in [pattern(16, 4), noisy(24, 6), pattern(9, 13), noisy(8, 8)] {
-            let smallest = encode_hdr_with_rle(&img, RleMode::Smallest).unwrap();
-            let new = encode_hdr_with_rle(&img, RleMode::New).unwrap();
-            let flat = encode_hdr_with_rle(&img, RleMode::Uncompressed).unwrap();
+            let smallest =
+                encode(&img, &EncodeOptions::default().with_rle(RleMode::Smallest)).unwrap();
+            let new = encode(&img, &EncodeOptions::default().with_rle(RleMode::New)).unwrap();
+            let flat = encode(
+                &img,
+                &EncodeOptions::default().with_rle(RleMode::Uncompressed),
+            )
+            .unwrap();
             assert!(smallest.len() <= new.len(), "vs New");
             assert!(smallest.len() <= flat.len(), "vs Uncompressed");
         }
@@ -1151,22 +1331,24 @@ mod tests {
         let w = 32u32;
         let solid = {
             let mut i = pattern(w, 1);
-            for px in i.pixels.iter_mut() {
-                *px = 0.5;
-            }
+            i.map_samples(|_| 0.5);
             i
         };
         let noise = noisy(w, 1);
         let mut pixels = Vec::new();
         for row in 0..8 {
             let src = if row % 2 == 0 { &solid } else { &noise };
-            pixels.extend_from_slice(&src.pixels);
+            pixels.extend_from_slice(&src.pixels());
         }
-        let img = HdrImage::new_rgb96f(w, 8, pixels);
+        let img = HdrImage::from_f32(w, 8, pixels).unwrap();
 
-        let smallest = encode_hdr_with_rle(&img, RleMode::Smallest).unwrap();
-        let new = encode_hdr_with_rle(&img, RleMode::New).unwrap();
-        let flat = encode_hdr_with_rle(&img, RleMode::Uncompressed).unwrap();
+        let smallest = encode(&img, &EncodeOptions::default().with_rle(RleMode::Smallest)).unwrap();
+        let new = encode(&img, &EncodeOptions::default().with_rle(RleMode::New)).unwrap();
+        let flat = encode(
+            &img,
+            &EncodeOptions::default().with_rle(RleMode::Uncompressed),
+        )
+        .unwrap();
         assert!(
             smallest.len() < new.len() && smallest.len() < flat.len(),
             "mixed content: smallest {} must beat both pure modes ({} / {})",
@@ -1175,14 +1357,14 @@ mod tests {
             flat.len()
         );
 
-        let back = crate::decoder::parse_hdr_with_options(
+        let back = decode_with(
             &smallest,
-            crate::rle::FallbackMode::Uncompressed,
+            &DecodeOptions::default().with_fallback(crate::rle::FallbackMode::Uncompressed),
         )
         .unwrap();
         assert_eq!(back.width, w);
         assert_eq!(back.height, 8);
-        for (i, (a, b)) in img.pixels.iter().zip(back.pixels.iter()).enumerate() {
+        for (i, (a, b)) in img.pixels().iter().zip(back.pixels().iter()).enumerate() {
             assert!((a - b).abs() < a.abs() * 0.02 + 1e-6, "px {i}: {a} vs {b}");
         }
     }
@@ -1192,8 +1374,12 @@ mod tests {
         // Widths the new-RLE marker can't address (here: 4 < 8) always
         // emit flat and never error.
         let img = pattern(4, 3);
-        let smallest = encode_hdr_with_rle(&img, RleMode::Smallest).unwrap();
-        let flat = encode_hdr_with_rle(&img, RleMode::Uncompressed).unwrap();
+        let smallest = encode(&img, &EncodeOptions::default().with_rle(RleMode::Smallest)).unwrap();
+        let flat = encode(
+            &img,
+            &EncodeOptions::default().with_rle(RleMode::Uncompressed),
+        )
+        .unwrap();
         assert_eq!(smallest, flat);
     }
 }

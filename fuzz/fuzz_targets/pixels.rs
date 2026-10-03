@@ -43,7 +43,8 @@
 //! `oxideav-core`.
 
 use libfuzzer_sys::fuzz_target;
-use oxideav_hdr::{parse_hdr_with_options, FallbackMode};
+use oxideav_hdr::{decode_with, DecodeOptions};
+use oxideav_hdr::{FallbackMode};
 
 fuzz_target!(|data: &[u8]| {
     // Need two bytes for the dimensions; the rest is the pixel section.
@@ -77,6 +78,6 @@ fuzz_target!(|data: &[u8]| {
     // must return a Result without panicking; the new-RLE marker path
     // is reachable from either when the pixel bytes start with the
     // `0x02 0x02 hi lo` marker for the chosen width.
-    let _ = parse_hdr_with_options(&buf, FallbackMode::OldRle);
-    let _ = parse_hdr_with_options(&buf, FallbackMode::Uncompressed);
+    let _ = decode_with(&buf, &DecodeOptions::default().with_fallback(FallbackMode::OldRle));
+    let _ = decode_with(&buf, &DecodeOptions::default().with_fallback(FallbackMode::Uncompressed));
 });

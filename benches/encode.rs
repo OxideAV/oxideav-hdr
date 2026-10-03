@@ -25,7 +25,8 @@
 //! ```
 
 use criterion::{black_box, criterion_group, criterion_main, Criterion, Throughput};
-use oxideav_hdr::{encode_hdr_with_rle, HdrImage, RleMode};
+use oxideav_hdr::{encode, EncodeOptions};
+use oxideav_hdr::{HdrImage, RleMode};
 
 /// Build a flat single-colour image of the given dimensions.
 fn solid_image(width: u32, height: u32, rgb: [f32; 3]) -> HdrImage {
@@ -36,7 +37,7 @@ fn solid_image(width: u32, height: u32, rgb: [f32; 3]) -> HdrImage {
         pixels.push(rgb[1]);
         pixels.push(rgb[2]);
     }
-    HdrImage::new_rgb96f(width, height, pixels)
+    HdrImage::from_f32(width, height, pixels).unwrap()
 }
 
 /// Build a deterministic gradient where every pixel differs from its
@@ -62,7 +63,7 @@ fn gradient_image(width: u32, height: u32) -> HdrImage {
             pixels.push((u + v) * 0.5 + 0.05);
         }
     }
-    HdrImage::new_rgb96f(width, height, pixels)
+    HdrImage::from_f32(width, height, pixels).unwrap()
 }
 
 fn bench_encode(c: &mut Criterion) {
@@ -84,32 +85,44 @@ fn bench_encode(c: &mut Criterion) {
 
         group.bench_function("new_rle", |b| {
             b.iter(|| {
-                let out = encode_hdr_with_rle(black_box(img), RleMode::New)
-                    .expect("encode (new RLE) failed");
+                let out = encode(
+                    black_box(img),
+                    &EncodeOptions::default().with_rle(RleMode::New),
+                )
+                .expect("encode (new RLE) failed");
                 black_box(out);
             });
         });
 
         group.bench_function("old_rle", |b| {
             b.iter(|| {
-                let out = encode_hdr_with_rle(black_box(img), RleMode::Old)
-                    .expect("encode (old RLE) failed");
+                let out = encode(
+                    black_box(img),
+                    &EncodeOptions::default().with_rle(RleMode::Old),
+                )
+                .expect("encode (old RLE) failed");
                 black_box(out);
             });
         });
 
         group.bench_function("auto_rle", |b| {
             b.iter(|| {
-                let out = encode_hdr_with_rle(black_box(img), RleMode::Auto)
-                    .expect("encode (auto RLE) failed");
+                let out = encode(
+                    black_box(img),
+                    &EncodeOptions::default().with_rle(RleMode::Auto),
+                )
+                .expect("encode (auto RLE) failed");
                 black_box(out);
             });
         });
 
         group.bench_function("uncompressed", |b| {
             b.iter(|| {
-                let out = encode_hdr_with_rle(black_box(img), RleMode::Uncompressed)
-                    .expect("encode (uncompressed) failed");
+                let out = encode(
+                    black_box(img),
+                    &EncodeOptions::default().with_rle(RleMode::Uncompressed),
+                )
+                .expect("encode (uncompressed) failed");
                 black_box(out);
             });
         });

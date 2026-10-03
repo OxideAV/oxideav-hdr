@@ -25,10 +25,8 @@
 //! discipline); the quad streams come from a small deterministic LCG so
 //! the matrix is reproducible and the wall stays spec-only.
 
-use oxideav_hdr::{
-    encode_hdr_with_options, parse_hdr_with_options, AxisSign, FallbackMode, HdrHeader, HdrImage,
-    LineEnding, Orientation, RleMode,
-};
+use oxideav_hdr::{decode_with, encode, DecodeOptions, EncodeOptions};
+use oxideav_hdr::{AxisSign, FallbackMode, HdrHeader, HdrImage, LineEnding, Orientation, RleMode};
 
 /// Deterministic 64-bit linear-congruential generator (Numerical Recipes
 /// constants). Reproducible across runs; no external dependency.
@@ -157,12 +155,20 @@ fn rgbe_quads_round_trip_bit_exactly_across_resolution_orientation_rle_matrix() 
 
                 let mut header = HdrHeader::default();
                 header.set_orientation(orientation);
-                let img = HdrImage::from_rgbe_quads(w, h, &quads, header);
+                let img = HdrImage::from_rgbe_quads(w, h, &quads, header).unwrap();
 
-                let bytes = encode_hdr_with_options(&img, rle, LineEnding::Lf)
-                    .unwrap_or_else(|e| panic!("encode {w}x{h} {orientation:?} {rle:?}: {e}"));
-                let back = parse_hdr_with_options(&bytes, fallback_for(rle))
-                    .unwrap_or_else(|e| panic!("decode {w}x{h} {orientation:?} {rle:?}: {e}"));
+                let bytes = encode(
+                    &img,
+                    &EncodeOptions::default()
+                        .with_rle(rle)
+                        .with_line_ending(LineEnding::Lf),
+                )
+                .unwrap_or_else(|e| panic!("encode {w}x{h} {orientation:?} {rle:?}: {e}"));
+                let back = decode_with(
+                    &bytes,
+                    &DecodeOptions::default().with_fallback(fallback_for(rle)),
+                )
+                .unwrap_or_else(|e| panic!("decode {w}x{h} {orientation:?} {rle:?}: {e}"));
 
                 assert_eq!(back.width, w, "{w}x{h} {orientation:?} {rle:?}: width");
                 assert_eq!(back.height, h, "{w}x{h} {orientation:?} {rle:?}: height");
@@ -194,9 +200,19 @@ fn rgbe_quads_round_trip_under_crlf_line_endings() {
     for &orientation in &ORIENTATIONS {
         let mut header = HdrHeader::default();
         header.set_orientation(orientation);
-        let img = HdrImage::from_rgbe_quads(w, h, &quads, header);
-        let bytes = encode_hdr_with_options(&img, RleMode::Auto, LineEnding::Crlf).unwrap();
-        let back = parse_hdr_with_options(&bytes, FallbackMode::OldRle).unwrap();
+        let img = HdrImage::from_rgbe_quads(w, h, &quads, header).unwrap();
+        let bytes = encode(
+            &img,
+            &EncodeOptions::default()
+                .with_rle(RleMode::Auto)
+                .with_line_ending(LineEnding::Crlf),
+        )
+        .unwrap();
+        let back = decode_with(
+            &bytes,
+            &DecodeOptions::default().with_fallback(FallbackMode::OldRle),
+        )
+        .unwrap();
         assert_eq!(back.to_rgbe_quads(), quads, "{orientation:?}: CRLF drift");
     }
 }
@@ -224,11 +240,19 @@ fn xyze_quads_round_trip_bit_exactly_across_orientation_and_rle() {
                     ..HdrHeader::default()
                 };
                 header.set_orientation(orientation);
-                let img = HdrImage::from_rgbe_quads(w, h, &quads, header);
-                let bytes = encode_hdr_with_options(&img, rle, LineEnding::Lf)
-                    .unwrap_or_else(|e| panic!("xyze encode {w}x{h} {orientation:?} {rle:?}: {e}"));
-                let back = parse_hdr_with_options(&bytes, fallback_for(rle))
-                    .unwrap_or_else(|e| panic!("xyze decode {w}x{h} {orientation:?} {rle:?}: {e}"));
+                let img = HdrImage::from_rgbe_quads(w, h, &quads, header).unwrap();
+                let bytes = encode(
+                    &img,
+                    &EncodeOptions::default()
+                        .with_rle(rle)
+                        .with_line_ending(LineEnding::Lf),
+                )
+                .unwrap_or_else(|e| panic!("xyze encode {w}x{h} {orientation:?} {rle:?}: {e}"));
+                let back = decode_with(
+                    &bytes,
+                    &DecodeOptions::default().with_fallback(fallback_for(rle)),
+                )
+                .unwrap_or_else(|e| panic!("xyze decode {w}x{h} {orientation:?} {rle:?}: {e}"));
                 assert_eq!(
                     back.header.format,
                     HdrFormat::Xyze,
@@ -264,9 +288,19 @@ fn rgbe_quads_round_trip_preserves_typed_header_records() {
         y_sign: AxisSign::Decreasing,
         ..HdrHeader::default()
     };
-    let img = HdrImage::from_rgbe_quads(w, h, &quads, header);
-    let bytes = encode_hdr_with_options(&img, RleMode::New, LineEnding::Lf).unwrap();
-    let back = parse_hdr_with_options(&bytes, FallbackMode::OldRle).unwrap();
+    let img = HdrImage::from_rgbe_quads(w, h, &quads, header).unwrap();
+    let bytes = encode(
+        &img,
+        &EncodeOptions::default()
+            .with_rle(RleMode::New)
+            .with_line_ending(LineEnding::Lf),
+    )
+    .unwrap();
+    let back = decode_with(
+        &bytes,
+        &DecodeOptions::default().with_fallback(FallbackMode::OldRle),
+    )
+    .unwrap();
 
     assert_eq!(back.to_rgbe_quads(), quads, "quad drift with typed records");
     assert_eq!(back.header.exposure, Some(1.5));

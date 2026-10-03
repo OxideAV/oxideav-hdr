@@ -17,12 +17,10 @@
 //! `cargo run --example gen_fixtures`, then commit the updated bytes
 //! together with the change.
 
+use oxideav_hdr::{decode, decode_with, encode, DecodeOptions, EncodeOptions};
 use std::path::PathBuf;
 
-use oxideav_hdr::{
-    encode_hdr, encode_hdr_with_options, encode_hdr_with_rle, parse_hdr, parse_hdr_with_options,
-    AxisSign, FallbackMode, HdrFormat, HdrPixelFormat, LineEnding, RleMode,
-};
+use oxideav_hdr::{AxisSign, FallbackMode, HdrFormat, HdrPixelFormat, LineEnding, RleMode};
 
 fn fixture_path(name: &str) -> PathBuf {
     // CARGO_MANIFEST_DIR is set by cargo for every `cargo test`
@@ -49,13 +47,13 @@ fn gradient_32x16_newrle_decode_and_reencode() {
     //   - FORMAT=32-bit_rle_rgbe + no other typed header records.
     // -----------------------------------------------------------------
     let bytes = read_fixture("gradient_32x16_newrle.hdr");
-    let img = parse_hdr(&bytes).expect("parse gradient new-RLE fixture");
+    let img = decode(&bytes).expect("parse gradient new-RLE fixture");
 
     // Resolution survives the round trip.
     assert_eq!(img.width, 32);
     assert_eq!(img.height, 16);
-    assert_eq!(img.pixel_format, HdrPixelFormat::Rgb96f);
-    assert_eq!(img.pixels.len(), 32 * 16 * 3);
+    assert_eq!(img.format, HdrPixelFormat::RgbF32Le);
+    assert_eq!(img.pixels().len(), 32 * 16 * 3);
 
     // Default axis flags (Y-first, decreasing Y, increasing X).
     assert!(!img.header.x_first);
@@ -76,9 +74,9 @@ fn gradient_32x16_newrle_decode_and_reencode() {
     // the documented `1e-3 * 10^(6*(u+v)*0.5)` gradient — guards
     // against an off-by-one in the decoder's row / column walk that a
     // structural assert alone would miss.
-    let r0 = img.pixels[0];
-    let last = img.pixels.len() - 3;
-    let r_last = img.pixels[last];
+    let r0 = img.pixels()[0];
+    let last = img.pixels().len() - 3;
+    let r_last = img.pixels()[last];
     assert!(r0 > 0.0 && r0 < 0.01, "top-left R = {r0}");
     assert!(
         r_last > 100.0 && r_last < 10_000.0,
@@ -87,7 +85,7 @@ fn gradient_32x16_newrle_decode_and_reencode() {
 
     // The decoder + encoder are byte-stable against the committed
     // fixture — re-emit and compare.
-    let reencoded = encode_hdr(&img).expect("re-encode gradient new-RLE");
+    let reencoded = encode(&img, &EncodeOptions::default()).expect("re-encode gradient new-RLE");
     assert_eq!(
         reencoded, bytes,
         "re-encoded bytes drifted from gradient_32x16_newrle.hdr",
@@ -103,11 +101,11 @@ fn solid_16x8_oldrle_decode_and_reencode() {
     // (EXPOSURE / GAMMA / SOFTWARE / VIEW / COLORCORR / PRIMARIES).
     // -----------------------------------------------------------------
     let bytes = read_fixture("solid_16x8_oldrle.hdr");
-    let img = parse_hdr(&bytes).expect("parse solid old-RLE fixture");
+    let img = decode(&bytes).expect("parse solid old-RLE fixture");
 
     assert_eq!(img.width, 16);
     assert_eq!(img.height, 8);
-    assert_eq!(img.pixels.len(), 16 * 8 * 3);
+    assert_eq!(img.pixels().len(), 16 * 8 * 3);
 
     // Every typed header slot survives the wire round trip with its
     // documented value.
@@ -131,14 +129,15 @@ fn solid_16x8_oldrle_decode_and_reencode() {
 
     // Solid colour — every pixel decodes to (0.5, 0.25, 0.125) within
     // shared-exponent quantisation noise.
-    for px in img.pixels.chunks_exact(3) {
+    for px in img.pixels().chunks_exact(3) {
         assert!((px[0] - 0.500).abs() < 0.01, "R drift: {}", px[0]);
         assert!((px[1] - 0.250).abs() < 0.01, "G drift: {}", px[1]);
         assert!((px[2] - 0.125).abs() < 0.01, "B drift: {}", px[2]);
     }
 
     // Re-emit with the same RLE mode and verify byte-identity.
-    let reencoded = encode_hdr_with_rle(&img, RleMode::Old).expect("re-encode solid old-RLE");
+    let reencoded = encode(&img, &EncodeOptions::default().with_rle(RleMode::Old))
+        .expect("re-encode solid old-RLE");
     assert_eq!(
         reencoded, bytes,
         "re-encoded bytes drifted from solid_16x8_oldrle.hdr",
@@ -155,11 +154,11 @@ fn gradient_32x16_crlf_plusy_decode_and_reencode() {
     // `OXIDEAV=fixture-r192` extra record.
     // -----------------------------------------------------------------
     let bytes = read_fixture("gradient_32x16_crlf_plusY.hdr");
-    let img = parse_hdr(&bytes).expect("parse gradient CRLF fixture");
+    let img = decode(&bytes).expect("parse gradient CRLF fixture");
 
     assert_eq!(img.width, 32);
     assert_eq!(img.height, 16);
-    assert_eq!(img.pixels.len(), 32 * 16 * 3);
+    assert_eq!(img.pixels().len(), 32 * 16 * 3);
 
     // +Y, +X, Y-first.
     assert!(!img.header.x_first);
@@ -179,13 +178,18 @@ fn gradient_32x16_crlf_plusy_decode_and_reencode() {
     // monotonic in both axes so the canonical buffer always has its
     // brightest pixel in the (decoded) bottom-right corner regardless
     // of how the file was oriented on disk.
-    let last = img.pixels.len() - 3;
-    assert!(img.pixels[last] > img.pixels[0]);
+    let last = img.pixels().len() - 3;
+    assert!(img.pixels()[last] > img.pixels()[0]);
 
     // Re-emit with the same options (new-RLE + CRLF, +Y +X axis
     // preserved by the decoded `header`) and verify byte-identity.
-    let reencoded = encode_hdr_with_options(&img, RleMode::New, LineEnding::Crlf)
-        .expect("re-encode gradient CRLF");
+    let reencoded = encode(
+        &img,
+        &EncodeOptions::default()
+            .with_rle(RleMode::New)
+            .with_line_ending(LineEnding::Crlf),
+    )
+    .expect("re-encode gradient CRLF");
     assert_eq!(
         reencoded, bytes,
         "re-encoded bytes drifted from gradient_32x16_crlf_plusY.hdr",
@@ -204,19 +208,22 @@ fn flat_4x2_uncompressed_decode_and_reencode() {
     // quads. The matching `RleMode::Uncompressed` encoder produces no
     // marker and no sentinels.
     //
-    // The fixture is read via `parse_hdr_with_options(..., Uncompressed)`
+    // The fixture is read via `decode_with(..., &DecodeOptions::default().with_fallback(Uncompressed))`
     // — the historical `parse_hdr` would fall back to old-RLE and could
     // misinterpret a literal `(1, 1, 1, *)` quad as a run sentinel,
     // per the round 196 read-side spec gap.
     // -----------------------------------------------------------------
     let bytes = read_fixture("flat_4x2_uncompressed.hdr");
-    let img = parse_hdr_with_options(&bytes, FallbackMode::Uncompressed)
-        .expect("parse flat 4x2 uncompressed fixture");
+    let img = decode_with(
+        &bytes,
+        &DecodeOptions::default().with_fallback(FallbackMode::Uncompressed),
+    )
+    .expect("parse flat 4x2 uncompressed fixture");
 
     assert_eq!(img.width, 4);
     assert_eq!(img.height, 2);
-    assert_eq!(img.pixel_format, HdrPixelFormat::Rgb96f);
-    assert_eq!(img.pixels.len(), 4 * 2 * 3);
+    assert_eq!(img.format, HdrPixelFormat::RgbF32Le);
+    assert_eq!(img.pixels().len(), 4 * 2 * 3);
 
     // Default axis flags (Y-first, decreasing Y, increasing X).
     assert!(!img.header.x_first);
@@ -230,9 +237,9 @@ fn flat_4x2_uncompressed_decode_and_reencode() {
     // documented ~1% precision.
     // Pixel (x=3, y=1) lives at row-major offset `(y * W + x) * 3`.
     let off_31 = (4 + 3) * 3;
-    let r31 = img.pixels[off_31];
-    let g31 = img.pixels[off_31 + 1];
-    let b31 = img.pixels[off_31 + 2];
+    let r31 = img.pixels()[off_31];
+    let g31 = img.pixels()[off_31 + 1];
+    let b31 = img.pixels()[off_31 + 2];
     assert!(
         (r31 - 2.0).abs() < 0.05,
         "pixel (3,1) R drifted: {r31} (want ~2.0)"
@@ -267,8 +274,11 @@ fn flat_4x2_uncompressed_decode_and_reencode() {
     );
 
     // Re-emit with the same options and verify byte-identity.
-    let reencoded =
-        encode_hdr_with_rle(&img, RleMode::Uncompressed).expect("re-encode flat uncompressed");
+    let reencoded = encode(
+        &img,
+        &EncodeOptions::default().with_rle(RleMode::Uncompressed),
+    )
+    .expect("re-encode flat uncompressed");
     assert_eq!(
         reencoded, bytes,
         "re-encoded bytes drifted from flat_4x2_uncompressed.hdr",
@@ -289,12 +299,12 @@ fn xyze_24x10_newrle_decode_luminance_and_reencode() {
     // scene-referred luminance divides only the EXPOSURE record out.
     // -----------------------------------------------------------------
     let bytes = read_fixture("xyze_24x10_newrle.hdr");
-    let img = parse_hdr(&bytes).expect("parse xyze new-RLE fixture");
+    let img = decode(&bytes).expect("parse xyze new-RLE fixture");
 
     assert_eq!(img.width, 24);
     assert_eq!(img.height, 10);
-    assert_eq!(img.pixel_format, HdrPixelFormat::Rgb96f);
-    assert_eq!(img.pixels.len(), 24 * 10 * 3);
+    assert_eq!(img.format, HdrPixelFormat::RgbF32Le);
+    assert_eq!(img.pixels().len(), 24 * 10 * 3);
 
     // Typed slots: XYZE format, EXPOSURE=2, reference-manual PRIMARIES.
     assert!(matches!(img.header.format, HdrFormat::Xyze));
@@ -307,7 +317,7 @@ fn xyze_24x10_newrle_decode_luminance_and_reencode() {
     // pixel, bit-for-bit, with no 179× factor.
     let lum = img.luminance_buffer();
     assert_eq!(lum.len(), 24 * 10);
-    for (i, px) in img.pixels.chunks_exact(3).enumerate() {
+    for (i, px) in img.pixels().chunks_exact(3).enumerate() {
         assert_eq!(
             lum[i].to_bits(),
             px[1].to_bits(),
@@ -320,7 +330,7 @@ fn xyze_24x10_newrle_decode_luminance_and_reencode() {
     // Scene-referred luminance divides the EXPOSURE=2 record back out:
     // exactly half the stored Y (2^-1 is an exact f32 scale).
     let scene = img.scene_referred_luminance_buffer();
-    for (i, px) in img.pixels.chunks_exact(3).enumerate() {
+    for (i, px) in img.pixels().chunks_exact(3).enumerate() {
         assert_eq!(
             scene[i].to_bits(),
             (px[1] * 0.5).to_bits(),
@@ -333,15 +343,15 @@ fn xyze_24x10_newrle_decode_luminance_and_reencode() {
     // The construction keeps chromaticity constant (X = 0.9·Y,
     // Z = 1.2·Y): spot-check the ratios within shared-exponent
     // quantisation noise, and the ~4-decade Y ramp's extremes.
-    let y0 = img.pixels[1];
-    let last = img.pixels.len() - 3;
-    let y_last = img.pixels[last + 1];
+    let y0 = img.pixels()[1];
+    let last = img.pixels().len() - 3;
+    let y_last = img.pixels()[last + 1];
     assert!(y0 > 0.04 && y0 < 0.06, "top-left Y = {y0}");
     assert!(
         y_last > 100.0 && y_last < 1000.0,
         "bottom-right Y = {y_last}"
     );
-    for px in img.pixels.chunks_exact(3) {
+    for px in img.pixels().chunks_exact(3) {
         assert!(
             (px[0] / px[1] - 0.9).abs() < 0.02,
             "X/Y = {}",
@@ -355,7 +365,7 @@ fn xyze_24x10_newrle_decode_luminance_and_reencode() {
     }
 
     // Byte-stable against the committed fixture.
-    let reencoded = encode_hdr(&img).expect("re-encode xyze new-RLE");
+    let reencoded = encode(&img, &EncodeOptions::default()).expect("re-encode xyze new-RLE");
     assert_eq!(
         reencoded, bytes,
         "re-encoded bytes drifted from xyze_24x10_newrle.hdr",

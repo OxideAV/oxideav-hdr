@@ -8,7 +8,8 @@
 //! reoriented picture through the real `encode_hdr` -> `parse_hdr` wire
 //! path to prove the transform survives a byte-level round-trip.
 
-use oxideav_hdr::{encode_hdr, parse_hdr, GeometricOp, HdrImage, HdrPixelFormat, Orientation};
+use oxideav_hdr::{decode, encode, EncodeOptions};
+use oxideav_hdr::{GeometricOp, HdrImage, HdrPixelFormat, Orientation};
 
 const ALL_ORIENT: [Orientation; 8] = [
     Orientation::Standard,
@@ -34,7 +35,7 @@ fn coord_image(w: u32, h: u32) -> HdrImage {
             pixels.push(1.0);
         }
     }
-    HdrImage::new_rgb96f(w, h, pixels)
+    HdrImage::from_f32(w, h, pixels).unwrap()
 }
 
 /// Coordinate ground truth: (dst_x, dst_y, out_w, out_h) for a source
@@ -54,7 +55,11 @@ fn model(op: GeometricOp, x: i64, y: i64, w: i64, h: i64) -> (i64, i64, i64, i64
 
 fn px(img: &HdrImage, x: u32, y: u32) -> [f32; 3] {
     let off = ((y * img.width + x) * 3) as usize;
-    [img.pixels[off], img.pixels[off + 1], img.pixels[off + 2]]
+    [
+        img.pixels()[off],
+        img.pixels()[off + 1],
+        img.pixels()[off + 2],
+    ]
 }
 
 #[test]
@@ -65,7 +70,7 @@ fn public_apply_geometric_matches_model_for_every_op() {
         img.apply_geometric(op);
         let (_, _, mw, mh) = model(op, 0, 0, w as i64, h as i64);
         assert_eq!((img.width as i64, img.height as i64), (mw, mh), "{op:?}");
-        assert_eq!(img.pixel_format, HdrPixelFormat::Rgb96f);
+        assert_eq!(img.format, HdrPixelFormat::RgbF32Le);
         for y in 0..h {
             for x in 0..w {
                 let (dx, dy, _, _) = model(op, x as i64, y as i64, w as i64, h as i64);
@@ -88,7 +93,7 @@ fn public_reorient_covers_full_orientation_matrix() {
             b.normalize_from(from);
             b.to_orientation(to);
             assert_eq!((a.width, a.height), (b.width, b.height), "{from:?}->{to:?}");
-            assert_eq!(a.pixels, b.pixels, "{from:?}->{to:?}");
+            assert_eq!(a.pixels(), b.pixels(), "{from:?}->{to:?}");
         }
     }
 }
@@ -105,7 +110,7 @@ fn public_op_then_inverse_restores_picture() {
             (original.width, original.height),
             "{op:?}"
         );
-        assert_eq!(img.pixels, original.pixels, "{op:?}");
+        assert_eq!(img.pixels(), original.pixels(), "{op:?}");
     }
 }
 
@@ -135,14 +140,14 @@ fn reorient_survives_encode_decode_round_trip() {
         }
     }
     let header = oxideav_hdr::HdrHeader::default();
-    let base = HdrImage::from_rgbe_quads(w, h, &quads, header);
+    let base = HdrImage::from_rgbe_quads(w, h, &quads, header).unwrap();
 
     for op in GeometricOp::ALL {
         let mut img = base.clone();
         img.apply_geometric(op);
 
-        let bytes = encode_hdr(&img).expect("encode reoriented picture");
-        let back = parse_hdr(&bytes).expect("decode reoriented picture");
+        let bytes = encode(&img, &EncodeOptions::default()).expect("encode reoriented picture");
+        let back = decode(&bytes).expect("decode reoriented picture");
 
         let (_, _, mw, mh) = model(op, 0, 0, w as i64, h as i64);
         assert_eq!(

@@ -51,10 +51,8 @@
 //! framework-free standalone API only and never links `oxideav-core`.
 
 use libfuzzer_sys::fuzz_target;
-use oxideav_hdr::{
-    encode_hdr_with_full_options, parse_hdr_with_options, FallbackMode, HdrFormat, HdrImage,
-    HdrPixelFormat, LineEnding, MagicLine, Orientation, Primaries, RleMode,
-};
+use oxideav_hdr::{decode_with, encode, DecodeOptions, EncodeOptions};
+use oxideav_hdr::{FallbackMode, HdrFormat, HdrImage, HdrPixelFormat, LineEnding, MagicLine, Orientation, Primaries, RleMode};
 
 /// Pull a float in `[0, 1)` out of one fuzz byte.
 fn unit(b: u8) -> f32 {
@@ -153,7 +151,7 @@ fuzz_target!(|data: &[u8]| {
         pixels.push((f32::from(byte) + 1.0) / 256.0);
     }
 
-    let mut image = HdrImage::new_rgb96f(width, height, pixels);
+    let mut image = HdrImage::from_f32(width, height, pixels).unwrap();
     image.header.format = format;
     image.header.set_orientation(orientation);
     image.header.exposure = Some(exposure);
@@ -174,7 +172,7 @@ fuzz_target!(|data: &[u8]| {
             .push("rpict -vf scene.vp scene.oct".to_string());
     }
 
-    let encoded = match encode_hdr_with_full_options(&image, rle, line_ending, magic) {
+    let encoded = match encode(&image, &EncodeOptions::default().with_rle(rle).with_line_ending(line_ending).with_magic(magic)) {
         Ok(v) => v,
         // The dimensions are constrained into the new-RLE range, so an
         // `Err` here (only emitted on zero-dim / length-mismatch / a
@@ -194,14 +192,14 @@ fuzz_target!(|data: &[u8]| {
         _ => FallbackMode::OldRle,
     };
 
-    let decoded = parse_hdr_with_options(&encoded, fallback)
+    let decoded = decode_with(&encoded, &DecodeOptions::default().with_fallback(fallback))
         .expect("encoder output must be parseable by parse_hdr_with_options");
 
     assert_eq!(decoded.width, width, "width survives round trip");
     assert_eq!(decoded.height, height, "height survives round trip");
-    assert_eq!(decoded.pixel_format, HdrPixelFormat::Rgb96f);
+    assert_eq!(decoded.format, HdrPixelFormat::RgbF32Le);
     assert_eq!(
-        decoded.pixels.len(),
+        decoded.pixels().len(),
         n,
         "decoded pixel buffer is width × height × 3 floats long",
     );

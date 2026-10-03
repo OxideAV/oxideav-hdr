@@ -124,15 +124,14 @@ impl Default for ToneMap {
 /// Apply `op` to every pixel of `image` and return a packed
 /// `width * height * 3` Rgb24 buffer in top-down memory order.
 pub fn tone_map(image: &HdrImage, op: ToneMap) -> Vec<u8> {
-    let n = image.pixels.len();
-    debug_assert_eq!(n % 3, 0);
+    let n = image.width() as usize * image.height() as usize * 3;
     let mut out = Vec::with_capacity(n);
-    for px in image.pixels.chunks_exact(3) {
-        let mapped = apply(op, [px[0], px[1], px[2]]);
+    image.for_each_pixel(|px| {
+        let mapped = apply(op, px);
         out.push(quantise(mapped[0]));
         out.push(quantise(mapped[1]));
         out.push(quantise(mapped[2]));
-    }
+    });
     out
 }
 
@@ -376,7 +375,7 @@ mod tests {
     use crate::image::HdrImage;
 
     fn one_pixel(rgb: [f32; 3]) -> HdrImage {
-        HdrImage::new_rgb96f(1, 1, vec![rgb[0], rgb[1], rgb[2]])
+        HdrImage::from_f32(1, 1, vec![rgb[0], rgb[1], rgb[2]]).unwrap()
     }
 
     #[test]
@@ -594,7 +593,7 @@ mod tests {
     fn output_length_matches_pixel_count() {
         // Multi-pixel image — ensure we emit exactly 3*W*H bytes.
         let pixels = vec![0.25_f32; 30 * 20 * 3];
-        let img = HdrImage::new_rgb96f(30, 20, pixels);
+        let img = HdrImage::from_f32(30, 20, pixels).unwrap();
         let out = tone_map(&img, ToneMap::Aces { exposure: 1.0 });
         assert_eq!(out.len(), 30 * 20 * 3);
     }

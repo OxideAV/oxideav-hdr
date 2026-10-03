@@ -15,8 +15,8 @@
 //! allocator. The return value is intentionally discarded.
 
 use libfuzzer_sys::fuzz_target;
-use oxideav_hdr::parse_hdr;
+use oxideav_hdr::{decode};
 
 fuzz_target!(|data: &[u8]| {
-    let _ = parse_hdr(data);
+    let _ = decode(data);
 });

@@ -11,7 +11,8 @@
 //! real file round-trip and that the `HdrImage` helpers implement that
 //! order end-to-end (not merely on an in-memory buffer).
 
-use oxideav_hdr::{encode_hdr, parse_hdr, HdrImage};
+use oxideav_hdr::HdrImage;
+use oxideav_hdr::{decode, encode, EncodeOptions};
 
 /// Build a picture whose stored channels the encoder can represent
 /// exactly enough for the shared-exponent round-trip, then attach a
@@ -22,7 +23,7 @@ fn gamma_image(gamma: f32) -> HdrImage {
     // shared-exponent quantiser reproduces them without loss.
     let base = [0.5_f32, 0.25, 0.125];
     let pixels: Vec<f32> = (0..8).flat_map(|_| base).collect();
-    let mut img = HdrImage::new_rgb96f(8, 1, pixels);
+    let mut img = HdrImage::from_f32(8, 1, pixels).unwrap();
     img.header.gamma = Some(gamma);
     img
 }
@@ -30,11 +31,11 @@ fn gamma_image(gamma: f32) -> HdrImage {
 #[test]
 fn gamma_header_survives_file_round_trip() {
     let src = gamma_image(2.2);
-    let bytes = encode_hdr(&src).unwrap();
+    let bytes = encode(&src, &EncodeOptions::default()).unwrap();
     // The header text must carry the record verbatim.
     let head = String::from_utf8_lossy(&bytes[..bytes.len().min(256)]);
     assert!(head.contains("GAMMA=2.2"), "GAMMA= not emitted: {head}");
-    let back = parse_hdr(&bytes).unwrap();
+    let back = decode(&bytes).unwrap();
     assert_eq!(back.header.gamma, Some(2.2));
     // effective_gamma reads the decoded slot, not the 1.0 default.
     assert!((back.effective_gamma() - 2.2).abs() < 1e-6);
@@ -43,21 +44,21 @@ fn gamma_header_survives_file_round_trip() {
 #[test]
 fn absent_gamma_decodes_to_linear_default() {
     let pixels: Vec<f32> = (0..8).flat_map(|_| [0.5_f32, 0.25, 0.125]).collect();
-    let src = HdrImage::new_rgb96f(8, 1, pixels);
-    let bytes = encode_hdr(&src).unwrap();
+    let src = HdrImage::from_f32(8, 1, pixels).unwrap();
+    let bytes = encode(&src, &EncodeOptions::default()).unwrap();
     let head = String::from_utf8_lossy(&bytes[..bytes.len().min(256)]);
     assert!(
         !head.contains("GAMMA="),
         "unexpected GAMMA= emitted: {head}"
     );
-    let back = parse_hdr(&bytes).unwrap();
+    let back = decode(&bytes).unwrap();
     assert!(back.header.gamma.is_none());
     // Default 1.0 ⇒ linearisation is the identity.
     assert!((back.effective_gamma() - 1.0).abs() < 1e-6);
-    let before = back.pixels.clone();
+    let before = back.pixels().clone();
     let mut lin = back.clone();
     lin.linearize_gamma();
-    assert_eq!(lin.pixels, before, "absent GAMMA must be identity");
+    assert_eq!(lin.pixels(), before, "absent GAMMA must be identity");
 }
 
 #[test]
@@ -67,19 +68,19 @@ fn decode_then_linearize_recovers_linear_channels() {
     // linearisation restores the linear channels to shared-exponent
     // precision.
     let linear: Vec<f32> = (0..8).flat_map(|_| [0.5_f32, 0.25, 0.125]).collect();
-    let mut src = HdrImage::new_rgb96f(8, 1, linear.clone());
+    let mut src = HdrImage::from_f32(8, 1, linear.clone()).unwrap();
     assert!(src.apply_gamma_encoding(2.2));
     assert_eq!(src.header.gamma, Some(2.2));
 
-    let bytes = encode_hdr(&src).unwrap();
-    let mut back = parse_hdr(&bytes).unwrap();
+    let bytes = encode(&src, &EncodeOptions::default()).unwrap();
+    let mut back = decode(&bytes).unwrap();
     assert_eq!(back.header.gamma, Some(2.2));
     back.linearize_gamma();
     assert!(back.header.gamma.is_none());
 
     // RGBE quantisation plus the gamma power round-trip: loosen tolerance
     // to the ~1% the format's ±1-in-200 mantissa allows.
-    for (a, b) in back.pixels.iter().zip(linear.iter()) {
+    for (a, b) in back.pixels().iter().zip(linear.iter()) {
         assert!((a - b).abs() < 2e-2, "{a} vs {b}");
     }
 }
@@ -93,17 +94,17 @@ fn full_decode_order_linearises_before_dividing_records() {
     let e = 4.0_f32;
     let cc = [1.0_f32, 4.0, 9.0];
     let stored: Vec<f32> = cc.iter().map(|c| (e * c).sqrt()).collect();
-    let mut img = HdrImage::new_rgb96f(1, 1, stored);
+    let mut img = HdrImage::from_f32(1, 1, stored).unwrap();
     img.header.gamma = Some(2.0);
     img.header.exposure = Some(e);
     img.header.colorcorr = Some(cc);
 
     let expect = img.linear_scene_referred_radiance_buffer();
     img.recover_linear_scene_referred_radiance();
-    for (a, b) in img.pixels.iter().zip(expect.iter()) {
+    for (a, b) in img.pixels().iter().zip(expect.iter()) {
         assert!((a - b).abs() < 1e-6, "mutator vs buffer: {a} vs {b}");
     }
-    for c in &img.pixels {
+    for c in &img.pixels() {
         assert!((c - 1.0).abs() < 1e-5, "recovered radiance {c} != 1.0");
     }
     assert!(img.header.gamma.is_none());
@@ -137,10 +138,10 @@ fn apply_then_linearize_round_trips_across_a_sweep() {
     for _ in 0..2000 {
         let g = rng.next_range(0.2, 5.0);
         let original: Vec<f32> = (0..3).map(|_| rng.next_range(1e-3, 8.0)).collect();
-        let mut img = HdrImage::new_rgb96f(1, 1, original.clone());
+        let mut img = HdrImage::from_f32(1, 1, original.clone()).unwrap();
         assert!(img.apply_gamma_encoding(g), "g={g} must apply");
         img.linearize_gamma();
-        for (a, b) in img.pixels.iter().zip(original.iter()) {
+        for (a, b) in img.pixels().iter().zip(original.iter()) {
             // Two powf passes at f32: relative tolerance.
             let tol = 1e-3 * b.max(1.0);
             assert!((a - b).abs() <= tol, "g={g}: {a} vs {b}");
@@ -163,7 +164,7 @@ fn recovery_matches_manual_linearise_then_divide_across_a_sweep() {
             rng.next_range(0.2, 3.0),
         ];
         let stored: Vec<f32> = (0..3).map(|_| rng.next_range(1e-3, 5.0)).collect();
-        let mut img = HdrImage::new_rgb96f(1, 1, stored.clone());
+        let mut img = HdrImage::from_f32(1, 1, stored.clone()).unwrap();
         img.header.gamma = Some(g);
         img.header.exposure = Some(e);
         img.header.colorcorr = Some(cc);
@@ -179,7 +180,7 @@ fn recovery_matches_manual_linearise_then_divide_across_a_sweep() {
             assert!((a - b).abs() <= tol, "buffer vs manual: {a} vs {b}");
         }
         img.recover_linear_scene_referred_radiance();
-        for (a, b) in img.pixels.iter().zip(buf.iter()) {
+        for (a, b) in img.pixels().iter().zip(buf.iter()) {
             assert!(
                 (a - b).abs() <= 1e-5 * b.abs().max(1.0),
                 "mutator vs buffer"
@@ -196,7 +197,7 @@ fn unit_gamma_helpers_reduce_to_plain_scene_referred() {
     let mut rng = Lcg(0xFEED_FACE_CAFE_BEEF);
     for _ in 0..500 {
         let stored: Vec<f32> = (0..6).map(|_| rng.next_range(0.0, 4.0)).collect();
-        let mut img = HdrImage::new_rgb96f(2, 1, stored);
+        let mut img = HdrImage::from_f32(2, 1, stored).unwrap();
         img.header.gamma = Some(1.0);
         img.header.exposure = Some(rng.next_range(0.1, 4.0));
         img.header.colorcorr = Some([
@@ -212,6 +213,6 @@ fn unit_gamma_helpers_reduce_to_plain_scene_referred() {
             img.linear_scene_referred_luminance_buffer(),
             img.scene_referred_luminance_buffer()
         );
-        assert_eq!(img.linear_radiance_buffer(), img.pixels);
+        assert_eq!(img.linear_radiance_buffer(), img.pixels());
     }
 }

@@ -6,12 +6,10 @@
 //! understands, decoder accepts a file ImageMagick produced) and the
 //! XYZE↔RGB conversion helpers' numerical accuracy.
 
+use oxideav_hdr::{decode, encode, EncodeOptions};
 use std::process::Command;
 
-use oxideav_hdr::{
-    convert_image_rgb_to_xyz, convert_image_xyz_to_rgb, encode_hdr, parse_hdr, HdrImage,
-    RgbColorSpace,
-};
+use oxideav_hdr::{convert_image_rgb_to_xyz, convert_image_xyz_to_rgb, HdrImage, RgbColorSpace};
 
 fn have_magick() -> bool {
     Command::new("magick")
@@ -36,7 +34,7 @@ fn synthetic(w: u32, h: u32) -> HdrImage {
             pixels.push(0.05 + 0.85 * (u * v).sqrt());
         }
     }
-    HdrImage::new_rgb96f(w, h, pixels)
+    HdrImage::from_f32(w, h, pixels).unwrap()
 }
 
 #[test]
@@ -46,7 +44,7 @@ fn imagemagick_can_decode_our_encoder_output() {
         return;
     }
     let img = synthetic(16, 8);
-    let bytes = encode_hdr(&img).expect("encode");
+    let bytes = encode(&img, &EncodeOptions::default()).expect("encode");
     let tmp_dir = std::env::temp_dir();
     let in_path = tmp_dir.join("oxideav_hdr_xvalidate_in.hdr");
     let out_path = tmp_dir.join("oxideav_hdr_xvalidate_out.ppm");
@@ -135,14 +133,14 @@ fn we_can_decode_imagemagick_output() {
         .expect("run magick");
     assert!(status.success(), "magick HDR write failed");
     let bytes = std::fs::read(&path).expect("read tmp HDR");
-    let img = parse_hdr(&bytes).expect("parse imagemagick HDR");
+    let img = decode(&bytes).expect("parse imagemagick HDR");
     assert_eq!(img.width, 16);
     assert_eq!(img.height, 8);
     // Top row should be near-black, bottom row near-white. We check
     // the average brightness per row to dodge per-pixel quantisation
     // noise.
     let avg_row = |y: usize| {
-        let row = &img.pixels[y * 16 * 3..(y + 1) * 16 * 3];
+        let row = &img.pixels()[y * 16 * 3..(y + 1) * 16 * 3];
         row.iter().sum::<f32>() / row.len() as f32
     };
     let top = avg_row(0);
@@ -164,7 +162,7 @@ fn xyze_roundtrip_preserves_radiometry_via_imagemagick() {
     let original = synthetic(16, 8);
     let mut xyz_image = original.clone();
     convert_image_rgb_to_xyz(&mut xyz_image, RgbColorSpace::Radiance);
-    let bytes = encode_hdr(&xyz_image).expect("encode XYZE");
+    let bytes = encode(&xyz_image, &EncodeOptions::default()).expect("encode XYZE");
     let tmp_dir = std::env::temp_dir();
     let xyze_path = tmp_dir.join("oxideav_hdr_xyze_in.hdr");
     let rgb_path = tmp_dir.join("oxideav_hdr_xyze_back.hdr");
@@ -178,7 +176,7 @@ fn xyze_roundtrip_preserves_radiometry_via_imagemagick() {
         .expect("run magick");
     assert!(status.success(), "magick XYZE→RGBE failed");
     let back_bytes = std::fs::read(&rgb_path).expect("read tmp rgbe");
-    let mut back = parse_hdr(&back_bytes).expect("parse RGBE");
+    let mut back = decode(&back_bytes).expect("parse RGBE");
     if matches!(back.header.format, oxideav_hdr::HdrFormat::Xyze) {
         // Some ImageMagick builds preserve the FORMAT tag — convert
         // ourselves so we end up comparing apples to apples.
@@ -191,9 +189,9 @@ fn xyze_roundtrip_preserves_radiometry_via_imagemagick() {
     // between, plus ImageMagick's internal colour management may add
     // a small chromatic adaptation.
     let mut max_err = 0.0f32;
-    for i in 0..original.pixels.len() {
-        let a = original.pixels[i];
-        let b = back.pixels[i];
+    for i in 0..original.pixels().len() {
+        let a = original.pixels()[i];
+        let b = back.pixels()[i];
         let err = (a - b).abs();
         if err > max_err {
             max_err = err;

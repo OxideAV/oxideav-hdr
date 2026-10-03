@@ -47,7 +47,7 @@ fn wide_range_gradient(w: u32, h: u32) -> HdrImage {
             pixels.push(mag * 0.25);
         }
     }
-    HdrImage::new_rgb96f(w, h, pixels)
+    HdrImage::from_f32(w, h, pixels).unwrap()
 }
 
 fn bench_xyz(c: &mut Criterion) {

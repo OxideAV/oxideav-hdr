@@ -12,12 +12,10 @@
 //! review well in a diff and don't bloat the crate's source-package
 //! download.
 
+use oxideav_hdr::{encode, EncodeOptions};
 use std::path::PathBuf;
 
-use oxideav_hdr::{
-    encode_hdr, encode_hdr_with_options, encode_hdr_with_rle, AxisSign, HdrFormat, HdrHeader,
-    HdrImage, HdrPixelFormat, LineEnding, Primaries, RleMode,
-};
+use oxideav_hdr::{AxisSign, HdrFormat, HdrImage, LineEnding, Primaries, RleMode};
 
 /// Deterministic 32×16 RGB gradient — same construction as the
 /// in-crate unit tests so the fixtures and the source-tree
@@ -37,7 +35,7 @@ fn gradient_32x16() -> HdrImage {
             pixels.push(mag * 0.25);
         }
     }
-    HdrImage::new_rgb96f(w, h, pixels)
+    HdrImage::from_f32(w, h, pixels).unwrap()
 }
 
 /// Deterministic 16×8 solid-colour image — exercises the new-RLE
@@ -50,7 +48,7 @@ fn solid_16x8() -> HdrImage {
         pixels[i * 3 + 1] = 0.250;
         pixels[i * 3 + 2] = 0.125;
     }
-    HdrImage::new_rgb96f(w, h, pixels)
+    HdrImage::from_f32(w, h, pixels).unwrap()
 }
 
 fn main() {
@@ -68,7 +66,8 @@ fn main() {
     // line endings, canonical `-Y H +X W` axis order, no extra
     // `KEY=VALUE` header records besides `FORMAT=`.
     // -----------------------------------------------------------------
-    let bytes = encode_hdr(&gradient_32x16()).expect("encode gradient new-RLE");
+    let bytes =
+        encode(&gradient_32x16(), &EncodeOptions::default()).expect("encode gradient new-RLE");
     let path = fixtures_dir.join("gradient_32x16_newrle.hdr");
     std::fs::write(&path, &bytes).expect("write gradient new-RLE fixture");
     eprintln!("wrote {} ({} bytes)", path.display(), bytes.len());
@@ -87,7 +86,8 @@ fn main() {
     img.header.view = Some("rvu -vp 0 0 10 -vd 0 0 -1".to_owned());
     img.header.colorcorr = Some([1.10, 1.00, 0.95]);
     img.header.primaries = Some(Primaries::SRGB);
-    let bytes = encode_hdr_with_rle(&img, RleMode::Old).expect("encode solid old-RLE");
+    let bytes = encode(&img, &EncodeOptions::default().with_rle(RleMode::Old))
+        .expect("encode solid old-RLE");
     let path = fixtures_dir.join("solid_16x8_oldrle.hdr");
     std::fs::write(&path, &bytes).expect("write solid old-RLE fixture");
     eprintln!("wrote {} ({} bytes)", path.display(), bytes.len());
@@ -107,8 +107,13 @@ fn main() {
     img.header
         .other
         .push(("OXIDEAV".to_owned(), "fixture-r192".to_owned()));
-    let bytes = encode_hdr_with_options(&img, RleMode::New, LineEnding::Crlf)
-        .expect("encode gradient crlf");
+    let bytes = encode(
+        &img,
+        &EncodeOptions::default()
+            .with_rle(RleMode::New)
+            .with_line_ending(LineEnding::Crlf),
+    )
+    .expect("encode gradient crlf");
     let path = fixtures_dir.join("gradient_32x16_crlf_plusY.hdr");
     std::fs::write(&path, &bytes).expect("write gradient CRLF fixture");
     eprintln!("wrote {} ({} bytes)", path.display(), bytes.len());
@@ -207,15 +212,12 @@ fn main() {
         1.50,
         1.00, // pixel (3,1)
     ]);
-    let img = HdrImage {
-        width: 4,
-        height: 2,
-        pixel_format: HdrPixelFormat::Rgb96f,
-        pixels,
-        header: HdrHeader::default(),
-    };
-    let bytes = encode_hdr_with_rle(&img, RleMode::Uncompressed)
-        .expect("encode flat 4x2 uncompressed fixture");
+    let img = HdrImage::from_f32(4, 2, pixels).expect("4x2 float buffer");
+    let bytes = encode(
+        &img,
+        &EncodeOptions::default().with_rle(RleMode::Uncompressed),
+    )
+    .expect("encode flat 4x2 uncompressed fixture");
     let path = fixtures_dir.join("flat_4x2_uncompressed.hdr");
     std::fs::write(&path, &bytes).expect("write flat uncompressed fixture");
     eprintln!("wrote {} ({} bytes)", path.display(), bytes.len());
@@ -249,11 +251,11 @@ fn main() {
             pixels.push(lum * 1.2); // Z
         }
     }
-    let mut img = HdrImage::new_rgb96f(w, h, pixels);
+    let mut img = HdrImage::from_f32(w, h, pixels).unwrap();
     img.header.format = HdrFormat::Xyze;
     img.header.exposure = Some(2.0);
     img.header.primaries = Some(Primaries::RADIANCE);
-    let bytes = encode_hdr(&img).expect("encode xyze new-RLE fixture");
+    let bytes = encode(&img, &EncodeOptions::default()).expect("encode xyze new-RLE fixture");
     let path = fixtures_dir.join("xyze_24x10_newrle.hdr");
     std::fs::write(&path, &bytes).expect("write xyze new-RLE fixture");
     eprintln!("wrote {} ({} bytes)", path.display(), bytes.len());

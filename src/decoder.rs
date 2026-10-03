@@ -1,29 +1,36 @@
 //! Radiance HDR top-level decode: read the magic line, the
 //! `KEY=VALUE` header, the resolution line, and the pixel rows.
 //!
-//! Output is always packed `Rgb96f` in top-down memory order
-//! (`width * height * 3` floats). The on-disk axis flags are honoured
-//! by reordering the rows / mirroring within each row at the end of
-//! decode so the consumer doesn't have to know about them.
+//! Output is always one packed `RgbF32Le` plane in top-down memory
+//! order (`width * height` little-endian float RGB triples). The
+//! on-disk axis flags are honoured by reordering the rows / mirroring
+//! within each row at the end of decode so the consumer doesn't have
+//! to know about them.
 //!
-//! With the default `registry` feature on, the gated `HdrDecoder`
-//! trait impl wraps [`parse_hdr`] for the `oxideav_core::Decoder`
-//! surface and tone-maps each pixel into Rgb24 at the boundary.
+//! The contract entry points live at the crate root ([`crate::decode`],
+//! [`crate::decode_with`], [`crate::info`]); this module holds the
+//! implementation plus the pre-contract `parse_hdr*` wrappers (kept for
+//! one release, deprecated). With the default `registry` feature on,
+//! the gated `HdrDecoder` trait impl wraps [`crate::decode`] for the
+//! `oxideav_core::Decoder` surface and emits the native float frame.
 
 use crate::error::{HdrError as Error, Result};
 use crate::header::{AxisSign, HdrFormat, HdrHeader, Primaries};
-use crate::image::{HdrImage, HdrPixelFormat};
+use crate::image::{HdrImage, ImageInfo, PixelFormat};
+#[allow(deprecated)]
 use crate::limits::HdrLimits;
+use crate::options::DecodeOptions;
 use crate::rgbe::rgbe_to_rgb;
 use crate::rle::{decode_scanline_with_fallback, FallbackMode};
 
 #[cfg(feature = "registry")]
 use oxideav_core::Decoder;
 #[cfg(feature = "registry")]
-use oxideav_core::{CodecId, CodecParameters, Frame, Packet, VideoFrame, VideoPlane};
+use oxideav_core::{CodecId, CodecParameters, Frame, Packet, VideoFrame};
 
 /// Factory registered with the codec registry. Consumes one packet per
-/// whole HDR file and produces one float-RGB frame.
+/// whole HDR file and produces one native `RgbF32Le` frame (with the
+/// colour-signal side-channel attached).
 #[cfg(feature = "registry")]
 pub fn make_decoder(_params: &CodecParameters) -> oxideav_core::Result<Box<dyn Decoder>> {
     Ok(Box::new(HdrDecoder {
@@ -46,8 +53,8 @@ impl Decoder for HdrDecoder {
         &self.codec_id
     }
     fn send_packet(&mut self, packet: &Packet) -> oxideav_core::Result<()> {
-        let image = parse_hdr(&packet.data)?;
-        self.pending = Some(image_to_video_frame(image));
+        let image = crate::decode(&packet.data)?;
+        self.pending = Some(crate::registry::image_into_video_frame(image, packet.pts));
         Ok(())
     }
     fn receive_frame(&mut self) -> oxideav_core::Result<Frame> {
@@ -68,107 +75,130 @@ impl Decoder for HdrDecoder {
     }
 }
 
-#[cfg(feature = "registry")]
-fn image_to_video_frame(image: HdrImage) -> VideoFrame {
-    // Tone-map to 8-bit Rgb24 at the framework boundary so the
-    // generic VideoFrame stays representable. The standalone API
-    // keeps the f32 channels.
-    let n = (image.width as usize) * (image.height as usize);
-    let mut data = Vec::with_capacity(n * 3);
-    let gamma = image.header.gamma.unwrap_or(2.2);
-    let exposure = image.header.exposure.unwrap_or(1.0);
-    for i in 0..n {
-        for c in 0..3 {
-            let v = image.pixels[i * 3 + c] * exposure;
-            let g = if v <= 0.0 { 0.0 } else { v.powf(1.0 / gamma) };
-            data.push((g.clamp(0.0, 1.0) * 255.0).round() as u8);
+// ---------------------------------------------------------------------------
+// Contract implementation (called by the crate-root functions)
+// ---------------------------------------------------------------------------
+
+/// Bytes per decoded pixel.
+const BPP: usize = 12;
+
+/// `true` when `bytes` starts with one of the two canonical magic
+/// lines, `#?RADIANCE` or `#?RGBE`. Total and allocation-free.
+pub(crate) fn probe(bytes: &[u8]) -> bool {
+    bytes.starts_with(b"#?RADIANCE") || bytes.starts_with(b"#?RGBE")
+}
+
+/// Header + resolution line only (no pixel decode, no limits).
+pub(crate) fn info(bytes: &[u8]) -> Result<ImageInfo> {
+    let mut cursor = 0usize;
+    let (mut header, _format_seen) = parse_header_ex(bytes, &mut cursor)?;
+    let (width, height) = parse_resolution(bytes, &mut cursor, &mut header)?;
+    Ok(ImageInfo::from_header(width, height, header))
+}
+
+/// The one decode implementation: header, resolution line, limits,
+/// pixel rows, reorientation to display order.
+pub(crate) fn decode_with(input: &[u8], opts: &DecodeOptions) -> Result<HdrImage> {
+    let mut cursor = 0usize;
+    let (mut header, format_seen) = parse_header_ex(input, &mut cursor)?;
+    if opts.strict {
+        match header.magic_id.as_deref() {
+            Some("RADIANCE") | Some("RGBE") => {}
+            other => {
+                return Err(Error::invalid(format!(
+                    "HDR: strict: magic identifier {other:?} is not RADIANCE / RGBE"
+                )))
+            }
+        }
+        if !format_seen {
+            return Err(Error::invalid(
+                "HDR: strict: header carries no FORMAT= record",
+            ));
         }
     }
-    VideoFrame {
-        pts: None,
-        planes: vec![VideoPlane {
-            stride: image.width as usize * 3,
-            data,
-        }],
+    let (width, height) = parse_resolution(input, &mut cursor, &mut header)?;
+    // Apply the caller-configured limits BEFORE allocating. The plane
+    // is `width * height * 12` bytes; without this gate a malicious
+    // header could OOM the host.
+    let plane_bytes = u64::from(width) * u64::from(height) * BPP as u64;
+    opts.check(width, height, plane_bytes)?;
+    let plane_len = usize::try_from(plane_bytes)
+        .map_err(|_| Error::limit("HDR: pixel-plane size overflows usize"))?;
+    let (w, h) = (width as usize, height as usize);
+    // Resolution line lists the *outer* axis first, then the inner axis.
+    // For Y-first files (`±Y H ±X W`) that's H scanlines of W pixels.
+    // For X-first files (`±X W ±Y H`) it's W scanlines of H pixels —
+    // each scanline is one column's worth of Y samples.
+    let (scanline_count, scanline_len) = if header.x_first { (w, h) } else { (h, w) };
+    let plane = decode_pixel_rows(
+        input,
+        &mut cursor,
+        scanline_len,
+        scanline_count,
+        plane_len,
+        opts.fallback,
+    )?;
+    if opts.strict && cursor < input.len() {
+        return Err(Error::invalid(format!(
+            "HDR: strict: {} trailing bytes after the last scanline",
+            input.len() - cursor
+        )));
     }
+    let plane = reorder_for_axis_flags(plane, w, h, &header);
+    HdrImage::packed(width, height, PixelFormat::RgbF32Le, w * BPP, plane)
+        .map(|img| img.with_header(header))
 }
 
 // ---------------------------------------------------------------------------
-// Public standalone API
+// Pre-contract entry points (deprecated wrappers, one release)
 // ---------------------------------------------------------------------------
 
-/// Decode a complete HDR file (magic line + `KEY=VALUE` header +
-/// resolution line + pixel rows) into an [`HdrImage`] tagged
-/// [`HdrPixelFormat::Rgb96f`], top-down. Applies the default
-/// [`HdrLimits`] (max 32 767 × 32 767, ≤ 256 MiB pixel buffer); for
-/// trusted input that needs larger pictures use
-/// [`parse_hdr_with_limits`] / [`parse_hdr_with_options_and_limits`].
+/// Decode a complete HDR file with the default limits and the old-RLE
+/// fallback.
+#[deprecated(note = "use oxideav_hdr::decode (IMAGE_CRATE_API)")]
 pub fn parse_hdr(input: &[u8]) -> Result<HdrImage> {
-    parse_hdr_with_options_and_limits(input, FallbackMode::OldRle, &HdrLimits::default())
+    decode_with(input, &DecodeOptions::default())
 }
 
-/// Like [`parse_hdr`] but with a caller-chosen [`HdrLimits`].
-///
-/// Pass [`HdrLimits::unbounded`] for trusted local input that needs to
-/// decode legitimately-huge pictures (the encoder's `Vec` capacity
-/// still bounds the worst case via the allocator); see [`HdrLimits`]
-/// for the field-by-field rationale of the defaults.
+/// Decode with caller-chosen limits.
+#[deprecated(note = "use oxideav_hdr::decode_with (IMAGE_CRATE_API)")]
+#[allow(deprecated)]
 pub fn parse_hdr_with_limits(input: &[u8], limits: &HdrLimits) -> Result<HdrImage> {
-    parse_hdr_with_options_and_limits(input, FallbackMode::OldRle, limits)
+    decode_with(input, &DecodeOptions::from(*limits))
 }
 
-/// Decode a complete HDR file picking the non-new-RLE fallback per
-/// `fallback`. See [`FallbackMode`] for the trade-off. Applies the
-/// default [`HdrLimits`].
-///
-/// Use [`FallbackMode::Uncompressed`] for files written with
-/// [`crate::encoder::RleMode::Uncompressed`] or any other flat-scanline
-/// writer; use [`FallbackMode::OldRle`] (the default of [`parse_hdr`])
-/// for pre-1991 sentinel-run files. The two modes diverge only when
-/// the new-RLE marker is absent: with `OldRle`, `(1, 1, 1, *)` quads
-/// are interpreted as run sentinels; with `Uncompressed`, every quad
-/// is a literal RGBE pixel.
+/// Decode picking the non-new-RLE fallback per `fallback`.
+#[deprecated(
+    note = "use oxideav_hdr::decode_with(.., &DecodeOptions::default().with_fallback(..)) (IMAGE_CRATE_API)"
+)]
 pub fn parse_hdr_with_options(input: &[u8], fallback: FallbackMode) -> Result<HdrImage> {
-    parse_hdr_with_options_and_limits(input, fallback, &HdrLimits::default())
+    decode_with(input, &DecodeOptions::default().with_fallback(fallback))
 }
 
-/// Full-control decode: pick the non-new-RLE fallback per `fallback`
-/// AND the resource ceilings per `limits` independently.
-///
-/// The limits apply at the resolution-line stage — before the decoder
-/// allocates the `width * height * 3` float pixel buffer — so a
-/// malicious header is rejected at the door with
-/// [`HdrError::TooLarge`](crate::HdrError::TooLarge) rather than
-/// triggering an unbounded allocation.
+/// Decode with both the fallback and the limits chosen.
+#[deprecated(note = "use oxideav_hdr::decode_with (IMAGE_CRATE_API)")]
+#[allow(deprecated)]
 pub fn parse_hdr_with_options_and_limits(
     input: &[u8],
     fallback: FallbackMode,
     limits: &HdrLimits,
 ) -> Result<HdrImage> {
-    let mut cursor = 0usize;
-    let mut header = parse_header(input, &mut cursor)?;
-    let (width, height) = parse_resolution(input, &mut cursor, &mut header, limits)?;
-    // Resolution line lists the *outer* axis first, then the inner axis.
-    // For Y-first files (`±Y H ±X W`) that's H scanlines of W pixels.
-    // For X-first files (`±X W ±Y H`) it's W scanlines of H pixels —
-    // each scanline is one column's worth of Y samples.
-    let (scanline_count, scanline_len) = if header.x_first {
-        (width, height)
-    } else {
-        (height, width)
-    };
-    let pixels = decode_pixel_rows(input, &mut cursor, scanline_len, scanline_count, fallback)?;
-    let pixels = reorder_for_axis_flags(pixels, width, height, &header);
-    Ok(HdrImage {
-        width: width as u32,
-        height: height as u32,
-        pixel_format: HdrPixelFormat::Rgb96f,
-        pixels,
-        header,
-    })
+    decode_with(input, &DecodeOptions::from(*limits).with_fallback(fallback))
 }
 
-fn parse_header(input: &[u8], cursor: &mut usize) -> Result<HdrHeader> {
+/// Compatibility wrapper around [`crate::decode`] returning an
+/// `oxideav_core::VideoFrame`. Available with the default `registry`
+/// feature. The frame is the native `RgbF32Le` plane, as
+/// `VideoFrame::from(HdrImage)` builds it.
+#[cfg(feature = "registry")]
+#[deprecated(note = "use VideoFrame::from(oxideav_hdr::decode(..)?) (IMAGE_CRATE_API)")]
+pub fn parse_hdr_videoframe(input: &[u8]) -> oxideav_core::Result<VideoFrame> {
+    Ok(VideoFrame::from(crate::decode(input)?))
+}
+
+/// Parse the magic line and the `KEY=VALUE` block; returns the header
+/// and whether a `FORMAT=` record was present (strict mode requires one).
+fn parse_header_ex(input: &[u8], cursor: &mut usize) -> Result<(HdrHeader, bool)> {
     // First line: magic. The staged format note documents the header
     // magic as the two-byte string `#?` (`HDRSTR[] = "#?"`) followed by a
     // caller-supplied identifier — `newheader(s)` writes `#?` then `s`,
@@ -339,7 +369,13 @@ fn parse_header(input: &[u8], cursor: &mut usize) -> Result<HdrHeader> {
             }
         }
     }
-    Ok(header)
+    Ok((header, format_seen))
+}
+
+/// [`parse_header_ex`] without the FORMAT-presence flag.
+#[cfg(test)]
+fn parse_header(input: &[u8], cursor: &mut usize) -> Result<HdrHeader> {
+    parse_header_ex(input, cursor).map(|(h, _)| h)
 }
 
 /// Merge a later `VIEW=` record into the accumulated view per the format
@@ -426,12 +462,15 @@ fn merge_view(prev: &str, next: &str) -> String {
     out.join(" ")
 }
 
+/// Parse the resolution line into display `(width, height)` and record
+/// the axis flags on `header`. No limits are applied here (so
+/// [`crate::info`] can describe any picture); values that do not fit a
+/// `u32` are rejected as malformed.
 fn parse_resolution(
     input: &[u8],
     cursor: &mut usize,
     header: &mut HdrHeader,
-    limits: &HdrLimits,
-) -> Result<(usize, usize)> {
+) -> Result<(u32, u32)> {
     let line =
         read_line(input, cursor).ok_or_else(|| Error::invalid("HDR: missing resolution line"))?;
     let line = trim_cr(line);
@@ -451,10 +490,10 @@ fn parse_resolution(
             "HDR: resolution line must have one X and one Y flag",
         ));
     }
-    let a_n: usize = a_val
+    let a_n: u32 = a_val
         .parse()
         .map_err(|_| Error::invalid("HDR: invalid resolution value"))?;
-    let b_n: usize = b_val
+    let b_n: u32 = b_val
         .parse()
         .map_err(|_| Error::invalid("HDR: invalid resolution value"))?;
     let (width, height, x_first, y_sign, x_sign);
@@ -473,41 +512,6 @@ fn parse_resolution(
     }
     if width == 0 || height == 0 {
         return Err(Error::invalid("HDR: zero dimension in resolution line"));
-    }
-    // Apply the caller-configured resource limits BEFORE returning the
-    // dimensions. The downstream pixel-buffer allocation is
-    // `width * height * 3 * sizeof(f32)`; without these checks a
-    // malicious header could either OOM the host or trigger a usize
-    // overflow that wraps the allocation request to a tiny value and
-    // sets up out-of-bounds writes later in the decode loop.
-    if width > limits.max_width as usize {
-        return Err(Error::too_large(format!(
-            "HDR: resolution width {width} exceeds HdrLimits::max_width ({})",
-            limits.max_width
-        )));
-    }
-    if height > limits.max_height as usize {
-        return Err(Error::too_large(format!(
-            "HDR: resolution height {height} exceeds HdrLimits::max_height ({})",
-            limits.max_height
-        )));
-    }
-    // Pixel-buffer size in bytes: `width * height * 3 * 4`. Use
-    // `checked_mul` so a hostile combination that still slips past the
-    // per-axis caps (e.g. when the caller relaxes the dimension caps
-    // but keeps `max_pixel_bytes` tight) is rejected at the arithmetic
-    // level rather than wrapping.
-    let pixel_count = width
-        .checked_mul(height)
-        .ok_or_else(|| Error::too_large("HDR: width × height overflows usize"))?;
-    let buf_bytes = pixel_count
-        .checked_mul(12)
-        .ok_or_else(|| Error::too_large("HDR: pixel-buffer size overflows usize"))?;
-    if buf_bytes > limits.max_pixel_bytes {
-        return Err(Error::too_large(format!(
-            "HDR: pixel-buffer size {buf_bytes} bytes exceeds HdrLimits::max_pixel_bytes ({})",
-            limits.max_pixel_bytes
-        )));
     }
     header.x_sign = x_sign;
     header.y_sign = y_sign;
@@ -533,36 +537,32 @@ fn parse_axis_flag(flag: &str) -> Result<(char, AxisSign)> {
     Ok((axis, sign))
 }
 
+/// Decode `height` scanlines of `width` RGBE quads into a packed
+/// little-endian `f32` RGB plane of exactly `plane_len` bytes
+/// (`width * height * 12`, pre-validated by the caller's limits).
 fn decode_pixel_rows(
     input: &[u8],
     cursor: &mut usize,
     width: usize,
     height: usize,
+    plane_len: usize,
     fallback: FallbackMode,
-) -> Result<Vec<f32>> {
-    // Defensive guard: `parse_resolution` already applies HdrLimits +
-    // checked_mul on the same product, but `decode_pixel_rows` is
-    // pub(crate) and would be reachable from a future test / helper
-    // that bypasses the resolution-line gate. Keep the overflow check
-    // here so the float-count multiplication never wraps.
-    let float_count = width
-        .checked_mul(height)
-        .and_then(|n| n.checked_mul(3))
-        .ok_or_else(|| Error::too_large("HDR: width × height × 3 overflows usize"))?;
-    let mut pixels = vec![0.0f32; float_count];
+) -> Result<Vec<u8>> {
+    debug_assert_eq!(plane_len, width * height * BPP);
+    let mut plane = vec![0u8; plane_len];
     let mut prev_pixel: Option<[u8; 4]> = None;
     for y in 0..height {
         let chans = decode_scanline_with_fallback(input, cursor, width, &mut prev_pixel, fallback)?;
-        for (x, ch_r) in chans[0].iter().enumerate() {
-            let rgbe = [*ch_r, chans[1][x], chans[2][x], chans[3][x]];
+        let row = &mut plane[y * width * BPP..(y + 1) * width * BPP];
+        for (x, px) in row.chunks_exact_mut(BPP).enumerate() {
+            let rgbe = [chans[0][x], chans[1][x], chans[2][x], chans[3][x]];
             let rgb = rgbe_to_rgb(rgbe);
-            let off = (y * width + x) * 3;
-            pixels[off] = rgb[0];
-            pixels[off + 1] = rgb[1];
-            pixels[off + 2] = rgb[2];
+            px[0..4].copy_from_slice(&rgb[0].to_le_bytes());
+            px[4..8].copy_from_slice(&rgb[1].to_le_bytes());
+            px[8..12].copy_from_slice(&rgb[2].to_le_bytes());
         }
     }
-    Ok(pixels)
+    Ok(plane)
 }
 
 /// Reorder rows / mirror within rows so the output is always top-down,
@@ -575,12 +575,12 @@ fn decode_pixel_rows(
 /// worth of Y samples — so we transpose first to land in the canonical
 /// `(y, x)` layout, then apply the axis-sign flips.
 fn reorder_for_axis_flags(
-    pixels: Vec<f32>,
+    plane: Vec<u8>,
     width: usize,
     height: usize,
     header: &HdrHeader,
-) -> Vec<f32> {
-    let mut out = pixels;
+) -> Vec<u8> {
+    let mut out = plane;
     if header.x_first {
         // Source layout: (x, y) row-major with `width` outer rows and
         // `height` inner cols. Transpose flips that to (y, x) row-major
@@ -589,49 +589,49 @@ fn reorder_for_axis_flags(
     }
     // After the optional transpose the in-memory layout is canonical
     // (y, x) with the caller-visible (width, height) dimensions.
-    out = apply_axis_flips(out, width, height, header.x_sign, header.y_sign);
-    out
+    apply_axis_flips(out, width, height, header.x_sign, header.y_sign)
 }
 
-fn transpose(pixels: &[f32], width: usize, height: usize) -> Vec<f32> {
-    let mut out = vec![0.0f32; pixels.len()];
-    // Source layout: (y, x) at offset (y*width + x)*3.
-    // Dest layout (transposed): (x, y) at offset (x*height + y)*3.
-    // After transpose, dimensions become (new_w=height, new_h=width).
+/// Transpose a `width × height` plane of 12-byte pixels into
+/// `height × width`.
+fn transpose(plane: &[u8], width: usize, height: usize) -> Vec<u8> {
+    let mut out = vec![0u8; plane.len()];
+    // Source layout: (y, x) at offset (y*width + x)*12.
+    // Dest layout (transposed): (x, y) at offset (x*height + y)*12.
     for y in 0..height {
         for x in 0..width {
-            let src = (y * width + x) * 3;
-            let dst = (x * height + y) * 3;
-            out[dst] = pixels[src];
-            out[dst + 1] = pixels[src + 1];
-            out[dst + 2] = pixels[src + 2];
+            let src = (y * width + x) * BPP;
+            let dst = (x * height + y) * BPP;
+            out[dst..dst + BPP].copy_from_slice(&plane[src..src + BPP]);
         }
     }
     out
 }
 
 fn apply_axis_flips(
-    pixels: Vec<f32>,
+    plane: Vec<u8>,
     width: usize,
     height: usize,
     x_sign: AxisSign,
     y_sign: AxisSign,
-) -> Vec<f32> {
+) -> Vec<u8> {
     let flip_y = matches!(y_sign, AxisSign::Increasing); // -Y is the standard top-down
     let flip_x = matches!(x_sign, AxisSign::Decreasing);
     if !flip_y && !flip_x {
-        return pixels;
+        return plane;
     }
-    let mut out = vec![0.0f32; pixels.len()];
+    let row = width * BPP;
+    let mut out = vec![0u8; plane.len()];
     for y in 0..height {
         let src_y = if flip_y { height - 1 - y } else { y };
-        for x in 0..width {
-            let src_x = if flip_x { width - 1 - x } else { x };
-            let src = (src_y * width + src_x) * 3;
-            let dst = (y * width + x) * 3;
-            out[dst] = pixels[src];
-            out[dst + 1] = pixels[src + 1];
-            out[dst + 2] = pixels[src + 2];
+        if flip_x {
+            for x in 0..width {
+                let src = src_y * row + (width - 1 - x) * BPP;
+                let dst = y * row + x * BPP;
+                out[dst..dst + BPP].copy_from_slice(&plane[src..src + BPP]);
+            }
+        } else {
+            out[y * row..(y + 1) * row].copy_from_slice(&plane[src_y * row..(src_y + 1) * row]);
         }
     }
     out
@@ -661,17 +661,10 @@ fn trim_cr(line: &[u8]) -> &[u8] {
     }
 }
 
-/// Compatibility wrapper around [`parse_hdr`] returning an
-/// `oxideav_core::VideoFrame`. Available with the default `registry`
-/// feature.
-#[cfg(feature = "registry")]
-pub fn parse_hdr_videoframe(input: &[u8]) -> oxideav_core::Result<VideoFrame> {
-    Ok(image_to_video_frame(parse_hdr(input)?))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::decode;
 
     #[test]
     fn read_line_handles_lf_and_crlf() {
@@ -1013,15 +1006,15 @@ mod tests {
         // float pixel buffer. The default HdrLimits cap (max_width =
         // 32_767) rejects the file at parse time.
         let bytes = b"#?RADIANCE\n\n-Y 1 +X 2000000000\n";
-        let err = parse_hdr(bytes).unwrap_err();
-        assert!(matches!(err, Error::TooLarge(_)), "got {err:?}");
+        let err = decode(bytes).unwrap_err();
+        assert!(matches!(err, Error::LimitExceeded(_)), "got {err:?}");
     }
 
     #[test]
     fn limits_reject_oversize_height_before_allocation() {
         let bytes = b"#?RADIANCE\n\n-Y 2000000000 +X 8\n";
-        let err = parse_hdr(bytes).unwrap_err();
-        assert!(matches!(err, Error::TooLarge(_)), "got {err:?}");
+        let err = decode(bytes).unwrap_err();
+        assert!(matches!(err, Error::LimitExceeded(_)), "got {err:?}");
     }
 
     #[test]
@@ -1031,8 +1024,8 @@ mod tests {
         // sit at the very edge of `max_width` / `max_height`, so the
         // pixel-byte cap is what fires.
         let bytes = b"#?RADIANCE\n\n-Y 32767 +X 32767\n";
-        let err = parse_hdr(bytes).unwrap_err();
-        assert!(matches!(err, Error::TooLarge(_)), "got {err:?}");
+        let err = decode(bytes).unwrap_err();
+        assert!(matches!(err, Error::LimitExceeded(_)), "got {err:?}");
     }
 
     #[test]
@@ -1042,14 +1035,14 @@ mod tests {
         // still fails downstream (the pixel section isn't present), but
         // with `InvalidData` rather than `TooLarge`.
         let bytes = b"#?RADIANCE\n\n-Y 32767 +X 32767\n";
-        let err = parse_hdr_with_limits(bytes, &HdrLimits::unbounded()).unwrap_err();
+        let err = decode_with(bytes, &DecodeOptions::default().unlimited()).unwrap_err();
         // Past the resolution-line gate, the absent pixel section will
         // either trip the new-RLE truncation guard (InvalidData) or
         // the per-row decode error — but NOT `TooLarge`. We assert the
         // negative so the test remains correct if the downstream error
         // shape evolves.
         assert!(
-            !matches!(err, Error::TooLarge(_)),
+            !matches!(err, Error::LimitExceeded(_)),
             "unbounded limits should not raise TooLarge, got {err:?}",
         );
     }
@@ -1061,13 +1054,9 @@ mod tests {
         // not) is rejected. The dimension caps are kept at their
         // default to confirm the pixel-byte axis fires independently.
         let bytes = b"#?RADIANCE\n\n-Y 4 +X 32\n";
-        let custom = HdrLimits {
-            max_pixel_bytes: 1024,
-            ..HdrLimits::default()
-        };
-        let err =
-            parse_hdr_with_options_and_limits(bytes, FallbackMode::OldRle, &custom).unwrap_err();
-        assert!(matches!(err, Error::TooLarge(_)), "got {err:?}");
+        let custom = DecodeOptions::default().with_max_bytes(1024u64);
+        let err = decode_with(bytes, &custom).unwrap_err();
+        assert!(matches!(err, Error::LimitExceeded(_)), "got {err:?}");
     }
 
     #[test]
@@ -1080,9 +1069,9 @@ mod tests {
         // Header is parseable to the point of the resolution line; the
         // pixel section is missing so the decode fails downstream, but
         // not with TooLarge.
-        let err = parse_hdr(bytes).unwrap_err();
+        let err = decode(bytes).unwrap_err();
         assert!(
-            !matches!(err, Error::TooLarge(_)),
+            !matches!(err, Error::LimitExceeded(_)),
             "32×16 must clear the default limits, got {err:?}",
         );
     }

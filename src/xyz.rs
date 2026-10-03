@@ -133,12 +133,7 @@ pub fn rgb_to_xyz(rgb: [f32; 3], space: RgbColorSpace) -> [f32; 3] {
 /// `32-bit_rle_rgbe` variant.
 pub fn convert_image_xyz_to_rgb(image: &mut crate::HdrImage, space: RgbColorSpace) {
     let m = xyz_to_rgb_matrix(space);
-    for px in image.pixels.chunks_exact_mut(3) {
-        let v = apply_matrix(m, [px[0], px[1], px[2]]);
-        px[0] = v[0];
-        px[1] = v[1];
-        px[2] = v[2];
-    }
+    image.map_pixels(|px| apply_matrix(m, px));
     image.header.format = crate::HdrFormat::Rgbe;
 }
 
@@ -147,12 +142,7 @@ pub fn convert_image_xyz_to_rgb(image: &mut crate::HdrImage, space: RgbColorSpac
 /// `32-bit_rle_xyze`.
 pub fn convert_image_rgb_to_xyz(image: &mut crate::HdrImage, space: RgbColorSpace) {
     let m = rgb_to_xyz_matrix(space);
-    for px in image.pixels.chunks_exact_mut(3) {
-        let v = apply_matrix(m, [px[0], px[1], px[2]]);
-        px[0] = v[0];
-        px[1] = v[1];
-        px[2] = v[2];
-    }
+    image.map_pixels(|px| apply_matrix(m, px));
     image.header.format = crate::HdrFormat::Xyze;
 }
 
@@ -185,12 +175,7 @@ pub fn convert_image_xyz_to_rgb_with_primaries(
         Some(m) => m,
         None => return false,
     };
-    for px in image.pixels.chunks_exact_mut(3) {
-        let v = apply_matrix(m, [px[0], px[1], px[2]]);
-        px[0] = v[0];
-        px[1] = v[1];
-        px[2] = v[2];
-    }
+    image.map_pixels(|px| apply_matrix(m, px));
     image.header.format = crate::HdrFormat::Rgbe;
     true
 }
@@ -212,12 +197,7 @@ pub fn convert_image_rgb_to_xyz_with_primaries(
         Some(m) => m,
         None => return false,
     };
-    for px in image.pixels.chunks_exact_mut(3) {
-        let v = apply_matrix(m, [px[0], px[1], px[2]]);
-        px[0] = v[0];
-        px[1] = v[1];
-        px[2] = v[2];
-    }
+    image.map_pixels(|px| apply_matrix(m, px));
     image.header.format = crate::HdrFormat::Xyze;
     true
 }
@@ -290,12 +270,7 @@ fn scale_matrix(m: [[f32; 3]; 3], s: f32) -> [[f32; 3]; 3] {
 /// photopic weights to their published 3-decimal rounding).
 pub fn convert_image_rgb_to_xyz_photometric(image: &mut crate::HdrImage, space: RgbColorSpace) {
     let m = scale_matrix(rgb_to_xyz_matrix(space), WHTEFFICACY);
-    for px in image.pixels.chunks_exact_mut(3) {
-        let v = apply_matrix(m, [px[0], px[1], px[2]]);
-        px[0] = v[0];
-        px[1] = v[1];
-        px[2] = v[2];
-    }
+    image.map_pixels(|px| apply_matrix(m, px));
     image.header.format = crate::HdrFormat::Xyze;
 }
 
@@ -312,12 +287,7 @@ pub fn convert_image_rgb_to_xyz_photometric(image: &mut crate::HdrImage, space: 
 /// is the purely colorimetric counterpart (no scale change).
 pub fn convert_image_xyz_to_rgb_photometric(image: &mut crate::HdrImage, space: RgbColorSpace) {
     let m = scale_matrix(xyz_to_rgb_matrix(space), 1.0 / WHTEFFICACY);
-    for px in image.pixels.chunks_exact_mut(3) {
-        let v = apply_matrix(m, [px[0], px[1], px[2]]);
-        px[0] = v[0];
-        px[1] = v[1];
-        px[2] = v[2];
-    }
+    image.map_pixels(|px| apply_matrix(m, px));
     image.header.format = crate::HdrFormat::Rgbe;
 }
 
@@ -339,12 +309,7 @@ pub fn convert_image_rgb_to_xyz_photometric_with_primaries(
         Some(m) => scale_matrix(m, WHTEFFICACY),
         None => return false,
     };
-    for px in image.pixels.chunks_exact_mut(3) {
-        let v = apply_matrix(m, [px[0], px[1], px[2]]);
-        px[0] = v[0];
-        px[1] = v[1];
-        px[2] = v[2];
-    }
+    image.map_pixels(|px| apply_matrix(m, px));
     image.header.format = crate::HdrFormat::Xyze;
     true
 }
@@ -365,12 +330,7 @@ pub fn convert_image_xyz_to_rgb_photometric_with_primaries(
         Some(m) => scale_matrix(m, 1.0 / WHTEFFICACY),
         None => return false,
     };
-    for px in image.pixels.chunks_exact_mut(3) {
-        let v = apply_matrix(m, [px[0], px[1], px[2]]);
-        px[0] = v[0];
-        px[1] = v[1];
-        px[2] = v[2];
-    }
+    image.map_pixels(|px| apply_matrix(m, px));
     image.header.format = crate::HdrFormat::Rgbe;
     true
 }
@@ -444,7 +404,7 @@ pub fn luminance_lm_per_sr_per_m2(pixel: [f32; 3], format: crate::HdrFormat) -> 
 }
 
 #[inline]
-fn apply_matrix(m: [[f32; 3]; 3], v: [f32; 3]) -> [f32; 3] {
+pub(crate) fn apply_matrix(m: [[f32; 3]; 3], v: [f32; 3]) -> [f32; 3] {
     [
         m[0][0] * v[0] + m[0][1] * v[1] + m[0][2] * v[2],
         m[1][0] * v[0] + m[1][1] * v[1] + m[1][2] * v[2],
@@ -701,13 +661,13 @@ mod tests {
     fn convert_image_helpers_flip_format_tag() {
         use crate::{HdrFormat, HdrImage};
         let pixels = vec![1.0, 0.5, 0.25, 0.7, 0.6, 0.5];
-        let mut img = HdrImage::new_rgb96f(2, 1, pixels.clone());
+        let mut img = HdrImage::from_f32(2, 1, pixels.clone()).unwrap();
         convert_image_rgb_to_xyz(&mut img, RgbColorSpace::Srgb);
         assert_eq!(img.header.format, HdrFormat::Xyze);
         // Round-trip back to RGB.
         convert_image_xyz_to_rgb(&mut img, RgbColorSpace::Srgb);
         assert_eq!(img.header.format, HdrFormat::Rgbe);
-        for (i, (got, want)) in img.pixels.iter().zip(pixels.iter()).enumerate() {
+        for (i, (got, want)) in img.pixels().iter().zip(pixels.iter()).enumerate() {
             assert!((got - want).abs() < 1e-4, "pixel {i}: {want} vs {got}");
         }
     }
@@ -899,7 +859,7 @@ mod tests {
         // cover (P3-D65 here, exercising the round-226 derivation).
         use crate::HdrImage;
         let original = vec![0.5_f32, 0.25, 0.10, 0.7, 0.6, 0.5, 0.1, 0.9, 0.3];
-        let mut img = HdrImage::new_rgb96f(3, 1, original.clone());
+        let mut img = HdrImage::from_f32(3, 1, original.clone()).unwrap();
         // RGB → XYZ via P3-D65.
         assert!(convert_image_rgb_to_xyz_with_primaries(
             &mut img,
@@ -912,7 +872,7 @@ mod tests {
             crate::Primaries::P3_D65
         ));
         assert_eq!(img.header.format, crate::HdrFormat::Rgbe);
-        for (i, (got, want)) in img.pixels.iter().zip(original.iter()).enumerate() {
+        for (i, (got, want)) in img.pixels().iter().zip(original.iter()).enumerate() {
             assert!(
                 (got - want).abs() < 1e-4,
                 "round-trip pixel {i}: {want} vs {got}"
@@ -930,16 +890,16 @@ mod tests {
         // updates both or trips this test.
         use crate::HdrImage;
         let xyz_buf = vec![0.4_f32, 0.3, 0.2, 0.7, 0.6, 0.5];
-        let mut a = HdrImage::new_rgb96f(2, 1, xyz_buf.clone());
+        let mut a = HdrImage::from_f32(2, 1, xyz_buf.clone()).unwrap();
         a.header.format = crate::HdrFormat::Xyze;
-        let mut b = HdrImage::new_rgb96f(2, 1, xyz_buf);
+        let mut b = HdrImage::from_f32(2, 1, xyz_buf).unwrap();
         b.header.format = crate::HdrFormat::Xyze;
         convert_image_xyz_to_rgb(&mut a, RgbColorSpace::Srgb);
         assert!(convert_image_xyz_to_rgb_with_primaries(
             &mut b,
             crate::Primaries::SRGB
         ));
-        for (i, (av, bv)) in a.pixels.iter().zip(b.pixels.iter()).enumerate() {
+        for (i, (av, bv)) in a.pixels().iter().zip(b.pixels().iter()).enumerate() {
             assert!((av - bv).abs() < 1e-3, "ch {i}: named={av} derived={bv}");
         }
         // Both helpers flip the tag the same way.
@@ -955,7 +915,7 @@ mod tests {
         // conversion.
         use crate::HdrImage;
         let original = vec![0.5_f32, 0.25, 0.10];
-        let mut img = HdrImage::new_rgb96f(1, 1, original.clone());
+        let mut img = HdrImage::from_f32(1, 1, original.clone()).unwrap();
         let original_format = img.header.format;
         let bad = crate::Primaries {
             red: (0.640, 0.330),
@@ -964,13 +924,13 @@ mod tests {
             white: (0.5, 0.0),
         };
         assert!(!convert_image_xyz_to_rgb_with_primaries(&mut img, bad));
-        assert_eq!(img.pixels, original, "pixels mutated on degenerate path");
+        assert_eq!(img.pixels(), original, "pixels mutated on degenerate path");
         assert_eq!(
             img.header.format, original_format,
             "format tag flipped on degenerate path"
         );
         assert!(!convert_image_rgb_to_xyz_with_primaries(&mut img, bad));
-        assert_eq!(img.pixels, original);
+        assert_eq!(img.pixels(), original);
         assert_eq!(img.header.format, original_format);
     }
 
@@ -981,10 +941,10 @@ mod tests {
         // Compare against an explicit call with the same primaries.
         use crate::HdrImage;
         let xyz_buf = vec![0.4_f32, 0.3, 0.2, 0.5, 0.4, 0.3];
-        let mut a = HdrImage::new_rgb96f(2, 1, xyz_buf.clone());
+        let mut a = HdrImage::from_f32(2, 1, xyz_buf.clone()).unwrap();
         a.header.format = crate::HdrFormat::Xyze;
         a.header.primaries = Some(crate::Primaries::REC2020);
-        let mut b = HdrImage::new_rgb96f(2, 1, xyz_buf);
+        let mut b = HdrImage::from_f32(2, 1, xyz_buf).unwrap();
         b.header.format = crate::HdrFormat::Xyze;
         b.header.primaries = Some(crate::Primaries::REC2020);
         assert!(convert_image_xyz_to_rgb_with_effective_primaries(&mut a));
@@ -992,7 +952,7 @@ mod tests {
             &mut b,
             crate::Primaries::REC2020
         ));
-        for (i, (av, bv)) in a.pixels.iter().zip(b.pixels.iter()).enumerate() {
+        for (i, (av, bv)) in a.pixels().iter().zip(b.pixels().iter()).enumerate() {
             assert!(
                 (av - bv).abs() < 1e-5,
                 "ch {i}: effective={av} explicit={bv}"
@@ -1007,10 +967,10 @@ mod tests {
         // Compare against an explicit call with that constant.
         use crate::HdrImage;
         let xyz_buf = vec![0.4_f32, 0.3, 0.2];
-        let mut a = HdrImage::new_rgb96f(1, 1, xyz_buf.clone());
+        let mut a = HdrImage::from_f32(1, 1, xyz_buf.clone()).unwrap();
         a.header.format = crate::HdrFormat::Xyze;
         // Leave a.header.primaries = None.
-        let mut b = HdrImage::new_rgb96f(1, 1, xyz_buf);
+        let mut b = HdrImage::from_f32(1, 1, xyz_buf).unwrap();
         b.header.format = crate::HdrFormat::Xyze;
         assert!(a.header.primaries.is_none());
         assert!(convert_image_xyz_to_rgb_with_effective_primaries(&mut a));
@@ -1018,7 +978,7 @@ mod tests {
             &mut b,
             crate::Primaries::RADIANCE
         ));
-        for (i, (av, bv)) in a.pixels.iter().zip(b.pixels.iter()).enumerate() {
+        for (i, (av, bv)) in a.pixels().iter().zip(b.pixels().iter()).enumerate() {
             assert!(
                 (av - bv).abs() < 1e-5,
                 "ch {i}: effective(default)={av} explicit={bv}"
@@ -1033,13 +993,13 @@ mod tests {
         // the effective-primaries wrappers.
         use crate::HdrImage;
         let original = vec![0.55_f32, 0.35, 0.20, 0.10, 0.80, 0.45];
-        let mut img = HdrImage::new_rgb96f(2, 1, original.clone());
+        let mut img = HdrImage::from_f32(2, 1, original.clone()).unwrap();
         img.header.primaries = Some(crate::Primaries::P3_D65);
         assert!(convert_image_rgb_to_xyz_with_effective_primaries(&mut img));
         assert_eq!(img.header.format, crate::HdrFormat::Xyze);
         assert!(convert_image_xyz_to_rgb_with_effective_primaries(&mut img));
         assert_eq!(img.header.format, crate::HdrFormat::Rgbe);
-        for (i, (got, want)) in img.pixels.iter().zip(original.iter()).enumerate() {
+        for (i, (got, want)) in img.pixels().iter().zip(original.iter()).enumerate() {
             assert!(
                 (got - want).abs() < 1e-4,
                 "round-trip pixel {i}: {want} vs {got}"
@@ -1054,12 +1014,12 @@ mod tests {
         // exactly WHTEFFICACY × the plain converter's output.
         use crate::HdrImage;
         let rgb = vec![0.55_f32, 0.35, 0.20, 0.10, 0.80, 0.45];
-        let mut photo = HdrImage::new_rgb96f(2, 1, rgb.clone());
-        let mut color = HdrImage::new_rgb96f(2, 1, rgb);
+        let mut photo = HdrImage::from_f32(2, 1, rgb.clone()).unwrap();
+        let mut color = HdrImage::from_f32(2, 1, rgb).unwrap();
         convert_image_rgb_to_xyz_photometric(&mut photo, RgbColorSpace::Radiance);
         convert_image_rgb_to_xyz(&mut color, RgbColorSpace::Radiance);
         assert_eq!(photo.header.format, crate::HdrFormat::Xyze);
-        for (i, (p, c)) in photo.pixels.iter().zip(color.pixels.iter()).enumerate() {
+        for (i, (p, c)) in photo.pixels().iter().zip(color.pixels().iter()).enumerate() {
             let want = c * WHTEFFICACY;
             assert!(
                 (p - want).abs() < want.abs() * 1e-5 + 1e-5,
@@ -1079,7 +1039,7 @@ mod tests {
         // agreement is within ~0.1 %.
         use crate::HdrImage;
         let rgb = vec![1.0_f32, 0.5, 0.25, 0.1, 0.8, 0.3, 2.0, 2.0, 2.0];
-        let mut img = HdrImage::new_rgb96f(3, 1, rgb);
+        let mut img = HdrImage::from_f32(3, 1, rgb).unwrap();
         let before = img.luminance_buffer(); // RGBE branch: 179 × weights.
         convert_image_rgb_to_xyz_photometric(&mut img, RgbColorSpace::Radiance);
         let after = img.luminance_buffer(); // XYZE branch: Y verbatim.
@@ -1107,12 +1067,12 @@ mod tests {
         use crate::HdrImage;
         for space in [RgbColorSpace::Srgb, RgbColorSpace::Radiance] {
             let original = vec![0.55_f32, 0.35, 0.20, 0.10, 0.80, 0.45];
-            let mut img = HdrImage::new_rgb96f(2, 1, original.clone());
+            let mut img = HdrImage::from_f32(2, 1, original.clone()).unwrap();
             convert_image_rgb_to_xyz_photometric(&mut img, space);
             assert_eq!(img.header.format, crate::HdrFormat::Xyze);
             convert_image_xyz_to_rgb_photometric(&mut img, space);
             assert_eq!(img.header.format, crate::HdrFormat::Rgbe);
-            for (i, (got, want)) in img.pixels.iter().zip(original.iter()).enumerate() {
+            for (i, (got, want)) in img.pixels().iter().zip(original.iter()).enumerate() {
                 assert!(
                     (got - want).abs() < 1e-4,
                     "space {space:?} pixel {i}: {want} vs {got}"
@@ -1127,8 +1087,8 @@ mod tests {
         // identity, and the forward leg is 179× the colorimetric one.
         use crate::HdrImage;
         let original = vec![0.55_f32, 0.35, 0.20];
-        let mut img = HdrImage::new_rgb96f(1, 1, original.clone());
-        let mut color = HdrImage::new_rgb96f(1, 1, original.clone());
+        let mut img = HdrImage::from_f32(1, 1, original.clone()).unwrap();
+        let mut color = HdrImage::from_f32(1, 1, original.clone()).unwrap();
         assert!(convert_image_rgb_to_xyz_photometric_with_primaries(
             &mut img,
             crate::Primaries::P3_D65
@@ -1137,7 +1097,7 @@ mod tests {
             &mut color,
             crate::Primaries::P3_D65
         ));
-        for (p, c) in img.pixels.iter().zip(color.pixels.iter()) {
+        for (p, c) in img.pixels().iter().zip(color.pixels().iter()) {
             let want = c * WHTEFFICACY;
             assert!((p - want).abs() < want.abs() * 1e-5 + 1e-5);
         }
@@ -1146,7 +1106,7 @@ mod tests {
             crate::Primaries::P3_D65
         ));
         assert_eq!(img.header.format, crate::HdrFormat::Rgbe);
-        for (i, (got, want)) in img.pixels.iter().zip(original.iter()).enumerate() {
+        for (i, (got, want)) in img.pixels().iter().zip(original.iter()).enumerate() {
             assert!(
                 (got - want).abs() < 1e-4,
                 "round-trip pixel {i}: {want} vs {got}"
@@ -1166,17 +1126,17 @@ mod tests {
             white: (0.333, 0.0), // yW = 0 → singular construction.
         };
         let pixels = vec![0.5_f32, 0.4, 0.3];
-        let mut img = HdrImage::new_rgb96f(1, 1, pixels.clone());
+        let mut img = HdrImage::from_f32(1, 1, pixels.clone()).unwrap();
         assert!(!convert_image_rgb_to_xyz_photometric_with_primaries(
             &mut img, degenerate
         ));
-        assert_eq!(img.pixels, pixels);
+        assert_eq!(img.pixels(), pixels);
         assert_eq!(img.header.format, crate::HdrFormat::Rgbe);
         img.header.format = crate::HdrFormat::Xyze;
         assert!(!convert_image_xyz_to_rgb_photometric_with_primaries(
             &mut img, degenerate
         ));
-        assert_eq!(img.pixels, pixels);
+        assert_eq!(img.pixels(), pixels);
         assert_eq!(img.header.format, crate::HdrFormat::Xyze);
     }
 
@@ -1188,34 +1148,34 @@ mod tests {
         use crate::HdrImage;
         let rgb = vec![0.55_f32, 0.35, 0.20];
         // Header record present: equals an explicit call with the record.
-        let mut a = HdrImage::new_rgb96f(1, 1, rgb.clone());
+        let mut a = HdrImage::from_f32(1, 1, rgb.clone()).unwrap();
         a.header.primaries = Some(crate::Primaries::REC2020);
-        let mut b = HdrImage::new_rgb96f(1, 1, rgb.clone());
+        let mut b = HdrImage::from_f32(1, 1, rgb.clone()).unwrap();
         assert!(convert_image_rgb_to_xyz_photometric_with_effective_primaries(&mut a));
         assert!(convert_image_rgb_to_xyz_photometric_with_primaries(
             &mut b,
             crate::Primaries::REC2020
         ));
-        for (av, bv) in a.pixels.iter().zip(b.pixels.iter()) {
+        for (av, bv) in a.pixels().iter().zip(b.pixels().iter()) {
             assert!((av - bv).abs() < av.abs() * 1e-6 + 1e-6);
         }
         // No record: equals an explicit call with Primaries::RADIANCE.
-        let mut c = HdrImage::new_rgb96f(1, 1, rgb.clone());
+        let mut c = HdrImage::from_f32(1, 1, rgb.clone()).unwrap();
         assert!(c.header.primaries.is_none());
-        let mut d = HdrImage::new_rgb96f(1, 1, rgb);
+        let mut d = HdrImage::from_f32(1, 1, rgb).unwrap();
         assert!(convert_image_rgb_to_xyz_photometric_with_effective_primaries(&mut c));
         assert!(convert_image_rgb_to_xyz_photometric_with_primaries(
             &mut d,
             crate::Primaries::RADIANCE
         ));
-        for (cv, dv) in c.pixels.iter().zip(d.pixels.iter()) {
+        for (cv, dv) in c.pixels().iter().zip(d.pixels().iter()) {
             assert!((cv - dv).abs() < cv.abs() * 1e-6 + 1e-6);
         }
         // And the inverse wrapper closes the loop back to the input.
         assert!(convert_image_xyz_to_rgb_photometric_with_effective_primaries(&mut c));
         assert_eq!(c.header.format, crate::HdrFormat::Rgbe);
-        assert!((c.pixels[0] - 0.55).abs() < 1e-4);
-        assert!((c.pixels[1] - 0.35).abs() < 1e-4);
-        assert!((c.pixels[2] - 0.20).abs() < 1e-4);
+        assert!((c.pixels()[0] - 0.55).abs() < 1e-4);
+        assert!((c.pixels()[1] - 0.35).abs() < 1e-4);
+        assert!((c.pixels()[2] - 0.20).abs() < 1e-4);
     }
 }

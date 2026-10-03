@@ -20,7 +20,7 @@
 //! does.
 
 use libfuzzer_sys::fuzz_target;
-use oxideav_hdr::parse_hdr;
+use oxideav_hdr::{decode};
 
 fuzz_target!(|data: &[u8]| {
     // Strip any embedded NUL bytes — `parse_hdr` reads the header as
@@ -59,5 +59,5 @@ fuzz_target!(|data: &[u8]| {
     buf.extend_from_slice(b"-Y 1 +X 8\n");
     buf.extend_from_slice(&[0x10, 0x20, 0x30, 0x80].repeat(8));
 
-    let _ = parse_hdr(&buf);
+    let _ = decode(&buf);
 });

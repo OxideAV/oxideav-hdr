@@ -1,32 +1,15 @@
-//! Decoder resource limits.
+//! Pre-contract decoder resource limits.
 //!
-//! The staged Radiance spec at
-//! `docs/image/hdr/radiance-hdr-rgbe-format.md` does not normatively cap
-//! the dimensions on the resolution line — the `M` and `N` integers can
-//! in principle be anything up to the textual representation width of
-//! `usize`. That's fine on a real-world Radiance picture (renderer
-//! outputs rarely exceed a few thousand pixels per side) but it leaves
-//! a sharp edge on a general-purpose decoder: an attacker-crafted file
-//! advertising `-Y 2147483647 +X 2147483647` would, with the round
-//! 1..201 decoder, immediately attempt to allocate a
-//! `2³¹ × 2³¹ × 3 × 4 ≈ 5 × 10¹⁹` byte float pixel buffer. The
-//! multiplication itself would silently wrap on 64-bit `usize` (the
-//! product overflows `2⁶⁴`), `Vec::new` would still try to allocate the
-//! wrapped value, and the host either OOMs or panics depending on the
-//! exact wrap.
-//!
-//! [`HdrLimits`] is the spec-compatible safeguard: the standalone
-//! [`crate::parse_hdr`] entry point now applies a conservative default
-//! that admits every legitimately-rendered Radiance picture in
-//! practice (`max_width = max_height = 32_767` — the same ceiling the
-//! new-RLE scanline marker can address — and a 256 MiB cap on the f32
-//! pixel buffer) while bounding the worst-case memory footprint.
-//! Callers that genuinely need to decode larger images can opt in via
-//! [`crate::parse_hdr_with_limits`] / [`crate::parse_hdr_with_options_and_limits`]
-//! with a customised [`HdrLimits`].
-//!
-//! See [`HdrLimits::unbounded`] for the explicit opt-out — useful for
-//! trusted local input only; do not use on data from the network.
+//! [`HdrLimits`] is superseded by [`crate::DecodeOptions`] (the
+//! image-crate API contract's `max_width` / `max_height` / `max_pixels`
+//! / `max_bytes` fields, `None` = unlimited). It is kept for one release
+//! as a deprecated type with a lossless `From<HdrLimits> for
+//! DecodeOptions` conversion so the deprecated `parse_hdr_with_limits`
+//! wrappers keep compiling.
+
+#![allow(deprecated)]
+
+use crate::options::DecodeOptions;
 
 /// Decoder resource limits applied during resolution-line validation.
 ///
@@ -50,9 +33,10 @@
 /// that bumps `max_pixel_bytes` past `usize::MAX / 12` continues to
 /// error gracefully rather than wrap.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[deprecated(note = "use oxideav_hdr::DecodeOptions (IMAGE_CRATE_API)")]
 pub struct HdrLimits {
     /// Maximum picture width in pixels (inclusive). Zero is still
-    /// rejected by [`crate::decoder::parse_hdr`] independent of this
+    /// rejected by [`crate::decode`] independent of this
     /// field.
     pub max_width: u32,
     /// Maximum picture height in pixels (inclusive).
@@ -92,6 +76,19 @@ impl HdrLimits {
     }
 }
 
+impl From<HdrLimits> for DecodeOptions {
+    /// Lossless mapping: the three inclusive caps become `Some(..)`
+    /// limits; `u32::MAX` / `usize::MAX` ([`HdrLimits::unbounded`])
+    /// become `None`.
+    fn from(l: HdrLimits) -> Self {
+        DecodeOptions::default()
+            .with_max_width((l.max_width != u32::MAX).then_some(l.max_width))
+            .with_max_height((l.max_height != u32::MAX).then_some(l.max_height))
+            .with_max_pixels(None)
+            .with_max_bytes((l.max_pixel_bytes != usize::MAX).then_some(l.max_pixel_bytes as u64))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -121,6 +118,19 @@ mod tests {
         let lim = HdrLimits::default();
         assert_eq!(lim.max_width, 32_767);
         assert_eq!(lim.max_height, 32_767);
+    }
+
+    #[test]
+    fn converts_losslessly_into_decode_options() {
+        let d = DecodeOptions::from(HdrLimits::default());
+        assert_eq!(d.max_width, Some(32_767));
+        assert_eq!(d.max_height, Some(32_767));
+        assert_eq!(d.max_pixels, None);
+        assert_eq!(d.max_bytes, Some(256 * 1024 * 1024));
+        let u = DecodeOptions::from(HdrLimits::unbounded());
+        assert_eq!(u.max_width, None);
+        assert_eq!(u.max_height, None);
+        assert_eq!(u.max_bytes, None);
     }
 
     #[test]

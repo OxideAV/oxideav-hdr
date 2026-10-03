@@ -54,19 +54,7 @@
 //! `oxideav-core`.
 
 use libfuzzer_sys::fuzz_target;
-use oxideav_hdr::{
-    convert_image_rgb_to_xyz, convert_image_rgb_to_xyz_photometric,
-    convert_image_rgb_to_xyz_photometric_with_effective_primaries,
-    convert_image_rgb_to_xyz_photometric_with_primaries,
-    convert_image_rgb_to_xyz_with_effective_primaries, convert_image_rgb_to_xyz_with_primaries,
-    convert_image_xyz_to_rgb, convert_image_xyz_to_rgb_photometric,
-    convert_image_xyz_to_rgb_photometric_with_effective_primaries,
-    convert_image_xyz_to_rgb_photometric_with_primaries,
-    convert_image_xyz_to_rgb_with_effective_primaries, convert_image_xyz_to_rgb_with_primaries,
-    luminance_lm_per_sr_per_m2, rgb_to_xyz, rgb_to_xyz_matrix_from_primaries, rgbe_shift_exponent,
-    tone_map, xyz_to_rgb, xyz_to_rgb_matrix_from_primaries, HdrFormat, HdrImage, Primaries,
-    RgbColorSpace, ToneMap,
-};
+use oxideav_hdr::{convert_image_rgb_to_xyz, convert_image_rgb_to_xyz_photometric, convert_image_rgb_to_xyz_photometric_with_effective_primaries, convert_image_rgb_to_xyz_photometric_with_primaries, convert_image_rgb_to_xyz_with_effective_primaries, convert_image_rgb_to_xyz_with_primaries, convert_image_xyz_to_rgb, convert_image_xyz_to_rgb_photometric, convert_image_xyz_to_rgb_photometric_with_effective_primaries, convert_image_xyz_to_rgb_photometric_with_primaries, convert_image_xyz_to_rgb_with_effective_primaries, convert_image_xyz_to_rgb_with_primaries, luminance_lm_per_sr_per_m2, rgb_to_xyz, rgb_to_xyz_matrix_from_primaries, rgbe_shift_exponent, tone_map, xyz_to_rgb, xyz_to_rgb_matrix_from_primaries, HdrFormat, HdrImage, Primaries, RgbColorSpace, ToneMap};
 
 /// Pull the next `f32` out of the byte stream, advancing the cursor by
 /// four. Returns `0.0` once the stream is exhausted so the remaining
@@ -147,17 +135,17 @@ fuzz_target!(|data: &[u8]| {
     for _ in 0..n {
         pixels.push(next_f32(data, &mut cursor));
     }
-    let base = HdrImage::new_rgb96f(width, height, pixels);
+    let base = HdrImage::from_f32(width, height, pixels).unwrap();
 
     // Named-space whole-image conversions: each must rewrite exactly
     // `n` floats in place and leave the buffer length unchanged.
     for space in [RgbColorSpace::Srgb, RgbColorSpace::Radiance] {
         let mut img = base.clone();
         convert_image_xyz_to_rgb(&mut img, space);
-        assert_eq!(img.pixels.len(), n, "xyz_to_rgb preserves buffer length");
+        assert_eq!(img.pixels().len(), n, "xyz_to_rgb preserves buffer length");
         let mut img = base.clone();
         convert_image_rgb_to_xyz(&mut img, space);
-        assert_eq!(img.pixels.len(), n, "rgb_to_xyz preserves buffer length");
+        assert_eq!(img.pixels().len(), n, "rgb_to_xyz preserves buffer length");
     }
 
     // Arbitrary-primaries conversions. The `bool` return is the
@@ -166,10 +154,10 @@ fuzz_target!(|data: &[u8]| {
     {
         let mut img = base.clone();
         let _ran = convert_image_xyz_to_rgb_with_primaries(&mut img, primaries);
-        assert_eq!(img.pixels.len(), n, "with_primaries preserves length");
+        assert_eq!(img.pixels().len(), n, "with_primaries preserves length");
         let mut img = base.clone();
         let _ran = convert_image_rgb_to_xyz_with_primaries(&mut img, primaries);
-        assert_eq!(img.pixels.len(), n, "with_primaries preserves length");
+        assert_eq!(img.pixels().len(), n, "with_primaries preserves length");
     }
 
     // The `_with_effective_primaries` wrappers thread the picture's own
@@ -178,10 +166,10 @@ fuzz_target!(|data: &[u8]| {
     {
         let mut img = base.clone();
         let _ran = convert_image_xyz_to_rgb_with_effective_primaries(&mut img);
-        assert_eq!(img.pixels.len(), n, "effective wrapper preserves length");
+        assert_eq!(img.pixels().len(), n, "effective wrapper preserves length");
         let mut img = base.clone();
         let _ran = convert_image_rgb_to_xyz_with_effective_primaries(&mut img);
-        assert_eq!(img.pixels.len(), n, "effective wrapper preserves length");
+        assert_eq!(img.pixels().len(), n, "effective wrapper preserves length");
     }
 
     // The photometric (file-faithful, WHTEFFICACY-folded) converter
@@ -190,24 +178,24 @@ fuzz_target!(|data: &[u8]| {
     for space in [RgbColorSpace::Srgb, RgbColorSpace::Radiance] {
         let mut img = base.clone();
         convert_image_rgb_to_xyz_photometric(&mut img, space);
-        assert_eq!(img.pixels.len(), n, "photometric preserves length");
+        assert_eq!(img.pixels().len(), n, "photometric preserves length");
         let mut img = base.clone();
         convert_image_xyz_to_rgb_photometric(&mut img, space);
-        assert_eq!(img.pixels.len(), n, "photometric preserves length");
+        assert_eq!(img.pixels().len(), n, "photometric preserves length");
     }
     {
         let mut img = base.clone();
         let _ran = convert_image_rgb_to_xyz_photometric_with_primaries(&mut img, primaries);
-        assert_eq!(img.pixels.len(), n, "photometric primaries len");
+        assert_eq!(img.pixels().len(), n, "photometric primaries len");
         let mut img = base.clone();
         let _ran = convert_image_xyz_to_rgb_photometric_with_primaries(&mut img, primaries);
-        assert_eq!(img.pixels.len(), n, "photometric primaries len");
+        assert_eq!(img.pixels().len(), n, "photometric primaries len");
         let mut img = base.clone();
         let _ran = convert_image_rgb_to_xyz_photometric_with_effective_primaries(&mut img);
-        assert_eq!(img.pixels.len(), n, "photometric effective len");
+        assert_eq!(img.pixels().len(), n, "photometric effective len");
         let mut img = base.clone();
         let _ran = convert_image_xyz_to_rgb_photometric_with_effective_primaries(&mut img);
-        assert_eq!(img.pixels.len(), n, "photometric effective len");
+        assert_eq!(img.pixels().len(), n, "photometric effective len");
     }
 
     // Record-consistent exposure adjustment: an arbitrary fuzz factor
@@ -220,7 +208,7 @@ fuzz_target!(|data: &[u8]| {
         let mut img = base.clone();
         let factor = exposure; // reuse a verbatim fuzz float
         let ran = img.adjust_exposure_factor(factor);
-        assert_eq!(img.pixels.len(), n, "adjust_exposure preserves length");
+        assert_eq!(img.pixels().len(), n, "adjust_exposure preserves length");
         if ran {
             if let Some(e) = img.header.exposure {
                 assert!(e.is_finite() && e > 0.0, "recorded EXPOSURE stays sane");
@@ -228,7 +216,7 @@ fuzz_target!(|data: &[u8]| {
         }
         let stops = i32::from(data[0] as i8); // full i8 range incl. negatives
         let _ = img.adjust_exposure_stops(stops);
-        assert_eq!(img.pixels.len(), n, "stops adjustment preserves length");
+        assert_eq!(img.pixels().len(), n, "stops adjustment preserves length");
     }
 
     // GAMMA= linearisation surface. The transfer exponent is a verbatim
@@ -243,7 +231,7 @@ fuzz_target!(|data: &[u8]| {
         let mut img = base.clone();
         img.header.gamma = Some(gamma);
         img.linearize_gamma();
-        assert_eq!(img.pixels.len(), n, "linearize_gamma preserves length");
+        assert_eq!(img.pixels().len(), n, "linearize_gamma preserves length");
         assert!(img.header.gamma.is_none(), "gamma slot cleared");
         assert!((img.effective_gamma() - 1.0).abs() < f32::EPSILON);
 
@@ -270,7 +258,7 @@ fuzz_target!(|data: &[u8]| {
             "linear scene-referred luminance buffer len"
         );
         img.recover_linear_scene_referred_radiance();
-        assert_eq!(img.pixels.len(), n, "recover preserves length");
+        assert_eq!(img.pixels().len(), n, "recover preserves length");
         assert!(img.header.gamma.is_none() && img.header.exposure.is_none());
 
         // Writer-side encoding: degenerate exponents rejected without
@@ -278,7 +266,7 @@ fuzz_target!(|data: &[u8]| {
         // GAMMA slot.
         let mut img = base.clone();
         let ran = img.apply_gamma_encoding(gamma);
-        assert_eq!(img.pixels.len(), n, "apply_gamma_encoding preserves length");
+        assert_eq!(img.pixels().len(), n, "apply_gamma_encoding preserves length");
         if ran {
             let g = img.header.gamma.expect("successful encode records GAMMA");
             assert!(g.is_finite() && g > 0.0, "recorded GAMMA stays sane");

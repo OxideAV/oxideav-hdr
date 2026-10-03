@@ -31,9 +31,8 @@
 //! ```
 
 use criterion::{black_box, criterion_group, criterion_main, Criterion, Throughput};
-use oxideav_hdr::{
-    encode_hdr_with_rle, parse_hdr, parse_hdr_with_options, FallbackMode, HdrImage, RleMode,
-};
+use oxideav_hdr::{decode, decode_with, encode, DecodeOptions, EncodeOptions};
+use oxideav_hdr::{FallbackMode, HdrImage, RleMode};
 
 /// Build a flat single-colour image of the given dimensions.
 fn solid_image(width: u32, height: u32, rgb: [f32; 3]) -> HdrImage {
@@ -44,7 +43,7 @@ fn solid_image(width: u32, height: u32, rgb: [f32; 3]) -> HdrImage {
         pixels.push(rgb[1]);
         pixels.push(rgb[2]);
     }
-    HdrImage::new_rgb96f(width, height, pixels)
+    HdrImage::from_f32(width, height, pixels).unwrap()
 }
 
 /// Build a deterministic gradient where every pixel differs from its
@@ -68,7 +67,7 @@ fn gradient_image(width: u32, height: u32) -> HdrImage {
             pixels.push((u + v) * 0.5 + 0.05);
         }
     }
-    HdrImage::new_rgb96f(width, height, pixels)
+    HdrImage::from_f32(width, height, pixels).unwrap()
 }
 
 fn bench_decode(c: &mut Criterion) {
@@ -83,10 +82,15 @@ fn bench_decode(c: &mut Criterion) {
 
     for (label, img) in &cases {
         // Pre-encode once per flavour; the bench times decode only.
-        let new_rle = encode_hdr_with_rle(img, RleMode::New).expect("encode (new RLE) failed");
-        let old_rle = encode_hdr_with_rle(img, RleMode::Old).expect("encode (old RLE) failed");
-        let flat =
-            encode_hdr_with_rle(img, RleMode::Uncompressed).expect("encode (uncompressed) failed");
+        let new_rle = encode(img, &EncodeOptions::default().with_rle(RleMode::New))
+            .expect("encode (new RLE) failed");
+        let old_rle = encode(img, &EncodeOptions::default().with_rle(RleMode::Old))
+            .expect("encode (old RLE) failed");
+        let flat = encode(
+            img,
+            &EncodeOptions::default().with_rle(RleMode::Uncompressed),
+        )
+        .expect("encode (uncompressed) failed");
 
         // One-shot sanity pass so a decode regression fails loudly here
         // instead of silently timing an error path.
@@ -95,7 +99,8 @@ fn bench_decode(c: &mut Criterion) {
             (&old_rle, FallbackMode::OldRle),
             (&flat, FallbackMode::Uncompressed),
         ] {
-            let back = parse_hdr_with_options(bytes, fallback).expect("sanity decode failed");
+            let back = decode_with(bytes, &DecodeOptions::default().with_fallback(fallback))
+                .expect("sanity decode failed");
             assert_eq!(back.width, img.width);
             assert_eq!(back.height, img.height);
         }
@@ -108,22 +113,25 @@ fn bench_decode(c: &mut Criterion) {
 
         group.bench_function("new_rle", |b| {
             b.iter(|| {
-                let out = parse_hdr(black_box(&new_rle)).expect("decode (new RLE) failed");
+                let out = decode(black_box(&new_rle)).expect("decode (new RLE) failed");
                 black_box(out);
             });
         });
 
         group.bench_function("old_rle", |b| {
             b.iter(|| {
-                let out = parse_hdr(black_box(&old_rle)).expect("decode (old RLE) failed");
+                let out = decode(black_box(&old_rle)).expect("decode (old RLE) failed");
                 black_box(out);
             });
         });
 
         group.bench_function("uncompressed", |b| {
             b.iter(|| {
-                let out = parse_hdr_with_options(black_box(&flat), FallbackMode::Uncompressed)
-                    .expect("decode (uncompressed) failed");
+                let out = decode_with(
+                    black_box(&flat),
+                    &DecodeOptions::default().with_fallback(FallbackMode::Uncompressed),
+                )
+                .expect("decode (uncompressed) failed");
                 black_box(out);
             });
         });

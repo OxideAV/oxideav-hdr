@@ -3,10 +3,10 @@
 //! Lives outside `src/` so it exercises the shipped re-exports and
 //! catches accidental visibility regressions.
 
+use oxideav_hdr::{decode, decode_with, encode, DecodeOptions, EncodeOptions};
 use oxideav_hdr::{
-    encode_hdr, encode_hdr_with_full_options, encode_hdr_with_options, encode_hdr_with_rle,
-    parse_hdr, parse_hdr_with_options, AxisSign, FallbackMode, HdrFormat, HdrImage, HdrPixelFormat,
-    LineEnding, MagicLine, Orientation, Primaries, RleMode,
+    AxisSign, FallbackMode, HdrFormat, HdrImage, HdrPixelFormat, LineEnding, MagicLine,
+    Orientation, Primaries, RleMode,
 };
 
 /// Same gradient construction as the in-crate unit tests, kept here to
@@ -23,22 +23,22 @@ fn gradient(w: u32, h: u32) -> HdrImage {
             pixels.push(mag * 0.25);
         }
     }
-    HdrImage::new_rgb96f(w, h, pixels)
+    HdrImage::from_f32(w, h, pixels).unwrap()
 }
 
 #[test]
 fn public_api_roundtrips_gradient() {
     let src = gradient(48, 24);
-    let bytes = encode_hdr(&src).unwrap();
-    let back = parse_hdr(&bytes).unwrap();
+    let bytes = encode(&src, &EncodeOptions::default()).unwrap();
+    let back = decode(&bytes).unwrap();
     assert_eq!(back.width, 48);
     assert_eq!(back.height, 24);
-    assert_eq!(back.pixel_format, HdrPixelFormat::Rgb96f);
+    assert_eq!(back.format, HdrPixelFormat::RgbF32Le);
     // Smoke-check the first and last pixel — bounds of the magnitude
     // range exercise both ends of the shared-exponent encoder.
-    let last = back.pixels.len() - 3;
-    assert!(back.pixels[0] > 0.0 && back.pixels[0] < 0.01);
-    assert!(back.pixels[last] > 100.0 && back.pixels[last] < 10_000.0);
+    let last = back.pixels().len() - 3;
+    assert!(back.pixels()[0] > 0.0 && back.pixels()[0] < 0.01);
+    assert!(back.pixels()[last] > 100.0 && back.pixels()[last] < 10_000.0);
 }
 
 #[test]
@@ -53,7 +53,7 @@ fn header_records_passthrough() {
     // `Rx Ry Gx Gy Bx By Wx Wy`. Use sRGB / Rec.709 primaries plus D65
     // — round-trip should preserve the field.
     src.header.primaries = Some(Primaries::SRGB);
-    let bytes = encode_hdr(&src).unwrap();
+    let bytes = encode(&src, &EncodeOptions::default()).unwrap();
     // Header should appear in the leading bytes. We slice up to the
     // double-newline that ends the KEY=VALUE block and check for our
     // records in that prefix only.
@@ -67,7 +67,7 @@ fn header_records_passthrough() {
     assert!(head.contains("SOFTWARE=oxideav-hdr round 1 selftest"));
     assert!(head.contains("COLORCORR=1.1 0.95 0.8"));
     assert!(head.contains("PRIMARIES=0.64 0.33"));
-    let back = parse_hdr(&bytes).unwrap();
+    let back = decode(&bytes).unwrap();
     assert_eq!(back.header.exposure, Some(1.5));
     assert_eq!(back.header.gamma, Some(2.4));
     assert_eq!(
@@ -93,10 +93,10 @@ fn encoder_honours_increasing_y_flag() {
     pixels[0] = 5.0;
     pixels[1] = 0.0;
     pixels[2] = 0.0;
-    let mut src = HdrImage::new_rgb96f(w, h, pixels);
+    let mut src = HdrImage::from_f32(w, h, pixels).unwrap();
     src.header.y_sign = AxisSign::Increasing; // +Y → bottom-up rows on disk
 
-    let bytes = encode_hdr(&src).unwrap();
+    let bytes = encode(&src, &EncodeOptions::default()).unwrap();
     // Find the resolution line — first non-empty line after the blank.
     let blank = bytes.windows(2).position(|w| w == b"\n\n").unwrap();
     let res_start = blank + 2;
@@ -108,11 +108,11 @@ fn encoder_honours_increasing_y_flag() {
     );
 
     // Decode and check the top-left pixel survives.
-    let back = parse_hdr(&bytes).unwrap();
+    let back = decode(&bytes).unwrap();
     assert!(
-        (back.pixels[0] - 5.0).abs() < 0.1,
+        (back.pixels()[0] - 5.0).abs() < 0.1,
         "lost top-left marker: {}",
-        back.pixels[0]
+        back.pixels()[0]
     );
     // And it really did get flipped on disk: with +Y, the on-disk
     // first scanline is the canonical bottom row, so a re-decode
@@ -140,9 +140,9 @@ fn encoder_writes_x_first_resolution_line_when_requested() {
     pixels[last] = 0.0;
     pixels[last + 1] = 9.0;
     pixels[last + 2] = 0.0;
-    let mut src = HdrImage::new_rgb96f(w, h, pixels);
+    let mut src = HdrImage::from_f32(w, h, pixels).unwrap();
     src.header.x_first = true;
-    let bytes = encode_hdr(&src).unwrap();
+    let bytes = encode(&src, &EncodeOptions::default()).unwrap();
     let blank = bytes.windows(2).position(|w| w == b"\n\n").unwrap();
     let res_start = blank + 2;
     let res_end = res_start + bytes[res_start..].iter().position(|&b| b == b'\n').unwrap();
@@ -158,20 +158,20 @@ fn encoder_writes_x_first_resolution_line_when_requested() {
         resline.contains(&format!(" {w} ")) && resline.ends_with(&format!(" {h}")),
         "expected '... {w} ... {h}', got: {resline:?}"
     );
-    let back = parse_hdr(&bytes).unwrap();
+    let back = decode(&bytes).unwrap();
     assert_eq!(back.width, w);
     assert_eq!(back.height, h);
     assert!(back.header.x_first);
     assert!(
-        (back.pixels[0] - 7.0).abs() < 0.1,
+        (back.pixels()[0] - 7.0).abs() < 0.1,
         "top-left pixel lost across x_first round-trip: {}",
-        back.pixels[0]
+        back.pixels()[0]
     );
-    let last = back.pixels.len() - 3;
+    let last = back.pixels().len() - 3;
     assert!(
-        (back.pixels[last + 1] - 9.0).abs() < 0.1,
+        (back.pixels()[last + 1] - 9.0).abs() < 0.1,
         "bottom-right pixel lost across x_first round-trip: {}",
-        back.pixels[last + 1]
+        back.pixels()[last + 1]
     );
 }
 
@@ -195,14 +195,14 @@ fn encoder_round_trips_all_eight_axis_orderings() {
     for &x_first in &[false, true] {
         for &y_sign in &[Decreasing, Increasing] {
             for &x_sign in &[Increasing, Decreasing] {
-                let mut img = HdrImage::new_rgb96f(w, h, pixels.clone());
+                let mut img = HdrImage::from_f32(w, h, pixels.clone()).unwrap();
                 img.header.x_first = x_first;
                 img.header.y_sign = y_sign;
                 img.header.x_sign = x_sign;
-                let bytes = encode_hdr(&img).unwrap_or_else(|e| {
+                let bytes = encode(&img, &EncodeOptions::default()).unwrap_or_else(|e| {
                     panic!("encode failed: {y_sign:?} {x_sign:?} x_first={x_first} → {e}")
                 });
-                let back = parse_hdr(&bytes).unwrap();
+                let back = decode(&bytes).unwrap();
                 assert_eq!(back.width, w);
                 assert_eq!(back.height, h);
                 assert_eq!(back.header.x_first, x_first);
@@ -211,7 +211,7 @@ fn encoder_round_trips_all_eight_axis_orderings() {
                 // Pixels should match within shared-exponent precision.
                 for i in 0..pixels.len() {
                     let a = pixels[i];
-                    let b = back.pixels[i];
+                    let b = back.pixels()[i];
                     let err = (a - b).abs();
                     // Bigger samples carry the shared-exponent — allow
                     // ~1% relative error or 1.0 absolute (small samples
@@ -238,13 +238,13 @@ fn rle_mode_auto_falls_back_to_old_for_narrow_widths() {
     let w = 4_u32;
     let h = 6_u32;
     let pixels = vec![0.5_f32; (w * h * 3) as usize];
-    let src = HdrImage::new_rgb96f(w, h, pixels);
-    assert!(encode_hdr_with_rle(&src, RleMode::New).is_err());
-    let bytes = encode_hdr_with_rle(&src, RleMode::Auto).unwrap();
-    let back = parse_hdr(&bytes).unwrap();
+    let src = HdrImage::from_f32(w, h, pixels).unwrap();
+    assert!(encode(&src, &EncodeOptions::default().with_rle(RleMode::New)).is_err());
+    let bytes = encode(&src, &EncodeOptions::default().with_rle(RleMode::Auto)).unwrap();
+    let back = decode(&bytes).unwrap();
     assert_eq!(back.width, w);
     assert_eq!(back.height, h);
-    for &v in &back.pixels {
+    for &v in &back.pixels() {
         assert!((v - 0.5).abs() < 1e-2, "value drift: {v}");
     }
 }
@@ -260,13 +260,19 @@ fn crlf_line_ending_roundtrips_via_public_api() {
     for (i, p) in pixels.iter_mut().enumerate() {
         *p = (i as f32 + 1.0) * 0.01;
     }
-    let mut src = HdrImage::new_rgb96f(w, h, pixels.clone());
+    let mut src = HdrImage::from_f32(w, h, pixels.clone()).unwrap();
     src.header.software = Some("oxideav-hdr/round5-crlf".to_owned());
-    let bytes = encode_hdr_with_options(&src, RleMode::New, LineEnding::Crlf).unwrap();
+    let bytes = encode(
+        &src,
+        &EncodeOptions::default()
+            .with_rle(RleMode::New)
+            .with_line_ending(LineEnding::Crlf),
+    )
+    .unwrap();
     assert!(bytes.starts_with(b"#?RADIANCE\r\n"));
     // Blank-line terminator must be `\r\n\r\n` (not bare `\n\n`).
     assert!(bytes.windows(4).any(|w| w == b"\r\n\r\n"));
-    let back = parse_hdr(&bytes).unwrap();
+    let back = decode(&bytes).unwrap();
     assert_eq!(back.width, w);
     assert_eq!(back.height, h);
     assert_eq!(
@@ -275,7 +281,7 @@ fn crlf_line_ending_roundtrips_via_public_api() {
     );
     // Sample a couple of pixels — the pixel payload is binary, so CRLF
     // shouldn't have touched it.
-    for (i, (&a, &b)) in pixels.iter().zip(back.pixels.iter()).enumerate() {
+    for (i, (&a, &b)) in pixels.iter().zip(back.pixels().iter()).enumerate() {
         assert!(
             (a - b).abs() < 0.02 || (a - b).abs() / a.max(1e-9) < 0.05,
             "pixel {i}: {a} vs {b}",
@@ -285,11 +291,11 @@ fn crlf_line_ending_roundtrips_via_public_api() {
 
 #[test]
 fn view_record_round_trips_via_public_api() {
-    let mut src = HdrImage::new_rgb96f(16, 2, vec![0.5_f32; 16 * 2 * 3]);
+    let mut src = HdrImage::from_f32(16, 2, vec![0.5_f32; 16 * 2 * 3]).unwrap();
     let view = "rpict -vp 1 2 3 -vd 0 0 -1 -vu 0 1 0 -vh 60 -vv 40";
     src.header.view = Some(view.to_owned());
-    let bytes = encode_hdr(&src).unwrap();
-    let back = parse_hdr(&bytes).unwrap();
+    let bytes = encode(&src, &EncodeOptions::default()).unwrap();
+    let back = decode(&bytes).unwrap();
     assert_eq!(back.header.view.as_deref(), Some(view));
 }
 
@@ -297,11 +303,11 @@ fn view_record_round_trips_via_public_api() {
 fn apply_exposure_and_colorcorr_chain_after_decode() {
     // Round 5: apply_exposure / apply_colorcorr fold the parsed
     // multiplicative factors into the pixel buffer in place.
-    let mut src = HdrImage::new_rgb96f(8, 2, vec![1.0_f32; 8 * 2 * 3]);
+    let mut src = HdrImage::from_f32(8, 2, vec![1.0_f32; 8 * 2 * 3]).unwrap();
     src.header.exposure = Some(0.5);
     src.header.colorcorr = Some([2.0, 1.0, 0.5]);
-    let bytes = encode_hdr_with_rle(&src, RleMode::Old).unwrap();
-    let mut back = parse_hdr(&bytes).unwrap();
+    let bytes = encode(&src, &EncodeOptions::default().with_rle(RleMode::Old)).unwrap();
+    let mut back = decode(&bytes).unwrap();
     assert_eq!(back.header.exposure, Some(0.5));
     assert_eq!(back.header.colorcorr, Some([2.0, 1.0, 0.5]));
     back.apply_exposure();
@@ -311,7 +317,7 @@ fn apply_exposure_and_colorcorr_chain_after_decode() {
     // Each pixel should have been multiplied by 0.5 then componentwise
     // by [2, 1, 0.5] → effective [1.0, 0.5, 0.25] starting from
     // [1, 1, 1]. Allow ~1.5% for shared-exponent quantisation.
-    for px in back.pixels.chunks_exact(3) {
+    for px in back.pixels().chunks_exact(3) {
         assert!((px[0] - 1.0).abs() < 0.02, "R: {}", px[0]);
         assert!((px[1] - 0.5).abs() < 0.02, "G: {}", px[1]);
         assert!((px[2] - 0.25).abs() < 0.02, "B: {}", px[2]);
@@ -334,8 +340,12 @@ fn uncompressed_rle_roundtrips_narrow_image_through_public_api() {
         pixels.push(v * 0.5);
         pixels.push(v * 0.25);
     }
-    let src = HdrImage::new_rgb96f(w, h, pixels.clone());
-    let bytes = encode_hdr_with_rle(&src, RleMode::Uncompressed).unwrap();
+    let src = HdrImage::from_f32(w, h, pixels.clone()).unwrap();
+    let bytes = encode(
+        &src,
+        &EncodeOptions::default().with_rle(RleMode::Uncompressed),
+    )
+    .unwrap();
 
     // Compute the on-disk pixel section size and confirm it equals
     // 4 * W * H — no marker, no sentinels.
@@ -344,10 +354,14 @@ fn uncompressed_rle_roundtrips_narrow_image_through_public_api() {
     let payload_len = bytes.len() - (res_end + 1);
     assert_eq!(payload_len, (w * h * 4) as usize);
 
-    let back = parse_hdr_with_options(&bytes, FallbackMode::Uncompressed).unwrap();
+    let back = decode_with(
+        &bytes,
+        &DecodeOptions::default().with_fallback(FallbackMode::Uncompressed),
+    )
+    .unwrap();
     assert_eq!(back.width, w);
     assert_eq!(back.height, h);
-    for (i, (a, b)) in pixels.iter().zip(back.pixels.iter()).enumerate() {
+    for (i, (a, b)) in pixels.iter().zip(back.pixels().iter()).enumerate() {
         let err = (a - b).abs();
         let rel = err / a.max(1e-30);
         assert!(rel < 0.03, "pixel {i}: src={a} back={b} rel={rel}");
@@ -362,8 +376,8 @@ fn rle_mode_auto_uses_new_for_normal_widths() {
     let w = 32_u32;
     let h = 4_u32;
     let pixels = vec![0.3_f32; (w * h * 3) as usize];
-    let src = HdrImage::new_rgb96f(w, h, pixels);
-    let bytes = encode_hdr_with_rle(&src, RleMode::Auto).unwrap();
+    let src = HdrImage::from_f32(w, h, pixels).unwrap();
+    let bytes = encode(&src, &EncodeOptions::default().with_rle(RleMode::Auto)).unwrap();
     // Locate the pixel-section start (first byte after the resolution
     // line's `\n`).
     let blank = bytes.windows(2).position(|w| w == b"\n\n").unwrap();
@@ -395,12 +409,12 @@ fn scene_referred_recovery_survives_encode_decode_via_public_api() {
         pixels.push(radiance[1] * exposure * colorcorr[1]);
         pixels.push(radiance[2] * exposure * colorcorr[2]);
     }
-    let mut src = HdrImage::new_rgb96f(w, h, pixels);
+    let mut src = HdrImage::from_f32(w, h, pixels).unwrap();
     src.header.exposure = Some(exposure);
     src.header.colorcorr = Some(colorcorr);
 
-    let bytes = encode_hdr(&src).unwrap();
-    let back = parse_hdr(&bytes).unwrap();
+    let bytes = encode(&src, &EncodeOptions::default()).unwrap();
+    let back = decode(&bytes).unwrap();
     // The decoder folds the records into the typed slots.
     assert_eq!(back.header.exposure, Some(exposure));
     assert_eq!(back.header.colorcorr, Some(colorcorr));
@@ -431,15 +445,15 @@ fn scene_referred_recovery_survives_encode_decode_via_public_api() {
     assert_eq!(back.header.colorcorr, Some(colorcorr));
 
     // In-place recovery: leaves identical values and clears the slots.
-    let mut back2 = parse_hdr(&bytes).unwrap();
+    let mut back2 = decode(&bytes).unwrap();
     back2.recover_scene_referred_radiance();
-    for (a, b) in back2.pixels.iter().zip(recovered.iter()) {
+    for (a, b) in back2.pixels().iter().zip(recovered.iter()) {
         assert!((a - b).abs() < 1e-6, "{a} vs {b}");
     }
     assert!(back2.header.exposure.is_none());
     assert!(back2.header.colorcorr.is_none());
     // After recovery + clear, a re-encode no longer carries the records.
-    let reencoded = encode_hdr(&back2).unwrap();
+    let reencoded = encode(&back2, &EncodeOptions::default()).unwrap();
     let blank = reencoded.windows(2).position(|w| w == b"\n\n").unwrap();
     let header_text = &reencoded[..blank];
     assert!(
@@ -519,20 +533,27 @@ fn full_option_matrix_round_trips_typed_header_and_orientation() {
                             .commands
                             .push("rpict -vf scene.vp scene.oct".to_string());
 
-                        let bytes = encode_hdr_with_full_options(&img, rle, eol, magic.clone())
-                            .expect("encode must succeed for in-range dims");
+                        let bytes = encode(
+                            &img,
+                            &EncodeOptions::default()
+                                .with_rle(rle)
+                                .with_line_ending(eol)
+                                .with_magic(magic.clone()),
+                        )
+                        .expect("encode must succeed for in-range dims");
 
                         let fallback = match rle {
                             RleMode::Uncompressed | RleMode::Smallest => FallbackMode::Uncompressed,
                             _ => FallbackMode::OldRle,
                         };
-                        let back = parse_hdr_with_options(&bytes, fallback)
-                            .expect("encoder output must decode");
+                        let back =
+                            decode_with(&bytes, &DecodeOptions::default().with_fallback(fallback))
+                                .expect("encoder output must decode");
 
                         let tag = format!("{rle:?}/{eol:?}/{magic:?}/{orientation:?}/{format:?}");
                         assert_eq!(back.width, w, "{tag}: width");
                         assert_eq!(back.height, h, "{tag}: height");
-                        assert_eq!(back.pixels.len(), (w * h * 3) as usize, "{tag}: buf len");
+                        assert_eq!(back.pixels().len(), (w * h * 3) as usize, "{tag}: buf len");
                         assert_eq!(back.header.format, format, "{tag}: FORMAT");
                         assert_eq!(back.header.orientation(), orientation, "{tag}: orientation");
 
@@ -620,7 +641,7 @@ fn public_parse_rejects_leading_old_rle_sentinel_first_scanline() {
         0x10, 0x20, 0x30, 0x80, // a literal that would follow
     ];
     let file = old_rle_one_row_file(4, &scanline);
-    let err = parse_hdr(&file).unwrap_err();
+    let err = decode(&file).unwrap_err();
     assert!(
         err.to_string().contains("leading sentinel"),
         "expected leading-sentinel rejection, got: {err}"
@@ -638,16 +659,20 @@ fn public_parse_accepts_old_rle_literal_then_sentinel_first_scanline() {
         0x01, 0x01, 0x01, 0x03, // repeat it 3× → 4 pixels total
     ];
     let file = old_rle_one_row_file(4, &scanline);
-    let img = parse_hdr(&file).unwrap();
+    let img = decode(&file).unwrap();
     assert_eq!(img.width, 4);
     assert_eq!(img.height, 1);
     // All four decoded pixels share the literal's RGBE, so the decoded
     // float RGB triples are all identical and strictly positive.
-    let p0 = [img.pixels[0], img.pixels[1], img.pixels[2]];
+    let p0 = [img.pixels()[0], img.pixels()[1], img.pixels()[2]];
     for px in 0..4 {
         let off = px * 3;
         assert_eq!(
-            [img.pixels[off], img.pixels[off + 1], img.pixels[off + 2]],
+            [
+                img.pixels()[off],
+                img.pixels()[off + 1],
+                img.pixels()[off + 2]
+            ],
             p0
         );
     }
@@ -676,16 +701,20 @@ fn public_parse_accepts_old_rle_run_spanning_scanline_boundary() {
         0x01, 0x01, 0x01, 0x04, // repeat the carried pixel 4× → row 2 (4 px)
     ];
     let file = old_rle_file(4, 2, &pixels);
-    let img = parse_hdr(&file).unwrap();
+    let img = decode(&file).unwrap();
     assert_eq!(img.width, 4);
     assert_eq!(img.height, 2);
     // All 8 pixels decode to the same strictly-positive RGB triple.
-    let p0 = [img.pixels[0], img.pixels[1], img.pixels[2]];
+    let p0 = [img.pixels()[0], img.pixels()[1], img.pixels()[2]];
     assert!(p0[0] > 0.0 && p0[1] > 0.0 && p0[2] > 0.0);
     for px in 0..8 {
         let off = px * 3;
         assert_eq!(
-            [img.pixels[off], img.pixels[off + 1], img.pixels[off + 2]],
+            [
+                img.pixels()[off],
+                img.pixels()[off + 1],
+                img.pixels()[off + 2]
+            ],
             p0,
             "pixel {px} diverged"
         );
@@ -707,8 +736,8 @@ fn photometric_xyze_pipeline_survives_encode_decode() {
     let lum_before = img.luminance_buffer(); // RGBE branch (179 × weights).
 
     convert_image_rgb_to_xyz_photometric(&mut img, RgbColorSpace::Radiance);
-    let bytes = encode_hdr(&img).expect("encode XYZE");
-    let decoded = parse_hdr(&bytes).expect("decode XYZE");
+    let bytes = encode(&img, &EncodeOptions::default()).expect("encode XYZE");
+    let decoded = decode(&bytes).expect("decode XYZE");
     assert!(matches!(decoded.header.format, HdrFormat::Xyze));
 
     // Luminance survives the conversion + shared-exponent quantisation:
@@ -747,8 +776,8 @@ fn stop_adjustment_survives_encode_decode_with_recoverable_radiance() {
 
     let mut bright = img;
     assert!(bright.adjust_exposure_stops(3));
-    let bytes = encode_hdr(&bright).expect("encode adjusted");
-    let decoded = parse_hdr(&bytes).expect("decode adjusted");
+    let bytes = encode(&bright, &EncodeOptions::default()).expect("encode adjusted");
+    let decoded = decode(&bytes).expect("decode adjusted");
 
     // The EXPOSURE record survived the text round-trip…
     assert_eq!(decoded.header.exposure, Some(8.0));
