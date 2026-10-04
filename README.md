@@ -44,6 +44,7 @@ if oxideav_hdr::probe(&bytes) {
     // 8-bit in: bytes are linear / 255 unless `with_input_gamma(2.2)`.
     let _ = oxideav_hdr::encode_rgb8(w, h, &rgb8, &opts)?;
 }
+# Ok::<(), Box<dyn std::error::Error>>(())
 ```
 
 Root vocabulary: `probe`, `info -> ImageInfo`, `decode -> HdrImage`,
