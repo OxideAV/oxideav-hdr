@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `Cargo.toml` `exclude = ["/tests", "/fuzz"]` (crates.io 10 MiB cap);
+  the fixture corpus stays in git only.
+
 ### Changed
 
 - The crate root now follows the OxideAV image-crate API contract

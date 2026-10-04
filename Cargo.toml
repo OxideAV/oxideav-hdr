@@ -9,6 +9,8 @@ homepage = "https://github.com/OxideAV/oxideav-hdr"
 authors = ["Mark Karpeles"]
 description = "Pure-Rust Radiance RGBE (.hdr / .pic) decoder + encoder for oxideav — clean-room, default-on registry feature"
 readme = "README.md"
+# crates.io caps packages at 10 MiB; fixtures and the fuzz tree stay in git only.
+exclude = ["/tests", "/fuzz"]
 keywords = ["multimedia", "image", "hdr", "radiance", "rgbe"]
 categories = ["multimedia::encoding", "multimedia::images"]
 
