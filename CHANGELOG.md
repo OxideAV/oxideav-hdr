@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.0.6](https://github.com/OxideAV/oxideav-hdr/compare/v0.0.5...v0.0.6) - 2026-10-04
+
+### Other
+
+- Fleet sweep: crates.io exclude for tests and fuzz
+- README examples use the current registry API
+- README in the contract's section order + CHANGELOG Changed / Deprecated / Added
+- fuzz + ci: decode target covers probe / info / decode / strict; standalone clippy job
+- image-crate API contract (IMAGE_CRATE_API) — root vocabulary, contract HdrImage, registry bridge
+- hide internal pub surface from rustdoc/semver (fleet rule 2026-09-01)
+
 ### Added
 
 - `Cargo.toml` `exclude = ["/tests", "/fuzz"]` (crates.io 10 MiB cap);
