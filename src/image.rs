@@ -169,7 +169,7 @@ mod tests {
         let img = HdrImage::from_f32(3, 1, pixels.clone()).unwrap();
         let quads = img.to_rgbe_quads();
         assert_eq!(quads.len(), 3);
-        for (i, px) in pixels.chunks_exact(3).enumerate() {
+        for (i, px) in pixels.as_chunks::<3>().0.iter().enumerate() {
             assert_eq!(quads[i], rgb_to_rgbe([px[0], px[1], px[2]]), "pixel {i}");
         }
         // Spec §3 worked example: (1.0, 0.5, 0.25) -> (128, 64, 32, 129).
@@ -584,7 +584,7 @@ mod tests {
         img.header.colorcorr = Some([2.0, 4.0, 5.0]);
         let rgb = img.scene_referred_radiance_buffer();
         let lum = img.scene_referred_luminance_buffer();
-        for (i, px) in rgb.chunks_exact(3).enumerate() {
+        for (i, px) in rgb.as_chunks::<3>().0.iter().enumerate() {
             let l =
                 crate::xyz::luminance_lm_per_sr_per_m2([px[0], px[1], px[2]], img.header.format);
             assert!((l - lum[i]).abs() < 1e-2, "pixel {i}: {l} vs {}", lum[i]);
@@ -1178,11 +1178,12 @@ mod tests {
         assert!(img.apply_gamma_encoding(2.2));
         assert_eq!(img.header.gamma, Some(2.2));
         // Encoded buffer differs from the linear original.
-        assert!(img
-            .pixels()
-            .iter()
-            .zip(original.iter())
-            .any(|(a, b)| (a - b).abs() > 1e-3));
+        assert!(
+            img.pixels()
+                .iter()
+                .zip(original.iter())
+                .any(|(a, b)| (a - b).abs() > 1e-3)
+        );
         img.linearize_gamma();
         for (a, b) in img.pixels().iter().zip(original.iter()) {
             assert!((a - b).abs() < 1e-5, "{a} vs {b}");
@@ -2168,12 +2169,12 @@ impl HdrImage {
         if width == 0 || height == 0 {
             return Err(HdrError::invalid("HDR: zero dimension"));
         }
-        if let Some(g) = gamma {
-            if !(g.is_finite() && g > 0.0) {
-                return Err(HdrError::invalid(format!(
-                    "HDR: input gamma {g} must be finite and positive"
-                )));
-            }
+        if let Some(g) = gamma
+            && !(g.is_finite() && g > 0.0)
+        {
+            return Err(HdrError::invalid(format!(
+                "HDR: input gamma {g} must be finite and positive"
+            )));
         }
         let n = (width as usize)
             .checked_mul(height as usize)
@@ -2376,7 +2377,7 @@ impl HdrImage {
         let h = self.height as usize;
         let mut out = Vec::with_capacity(w * h * 3);
         for row in self.rows() {
-            for px in row.chunks_exact(4).take(w * 3) {
+            for px in row.as_chunks::<4>().0.iter().take(w * 3) {
                 out.push(f32::from_le_bytes([px[0], px[1], px[2], px[3]]));
             }
         }
@@ -2419,7 +2420,7 @@ impl HdrImage {
     /// Call `f` on every pixel's float triple, in display order.
     pub fn for_each_pixel(&self, mut f: impl FnMut([f32; 3])) {
         for row in self.rows() {
-            for px in row.chunks_exact(BPP) {
+            for px in row.as_chunks::<BPP>().0 {
                 f([
                     f32::from_le_bytes([px[0], px[1], px[2], px[3]]),
                     f32::from_le_bytes([px[4], px[5], px[6], px[7]]),
@@ -2441,7 +2442,7 @@ impl HdrImage {
         };
         for y in 0..h {
             let r = &mut plane.data[y * stride..y * stride + row];
-            for px in r.chunks_exact_mut(BPP) {
+            for px in r.as_chunks_mut::<BPP>().0.iter_mut() {
                 let v = f([
                     f32::from_le_bytes([px[0], px[1], px[2], px[3]]),
                     f32::from_le_bytes([px[4], px[5], px[6], px[7]]),
@@ -2497,7 +2498,7 @@ impl HdrImage {
     pub fn to_rgba8(&self) -> Vec<u8> {
         let rgb = self.to_rgb8();
         let mut out = Vec::with_capacity(rgb.len() / 3 * 4);
-        for px in rgb.chunks_exact(3) {
+        for px in rgb.as_chunks::<3>().0 {
             out.extend_from_slice(px);
             out.push(255);
         }
@@ -2594,10 +2595,10 @@ impl HdrImage {
     /// `header.exposure` to signal that the pixels are now in
     /// post-exposure space. A second call is a no-op.
     pub fn apply_exposure(&mut self) {
-        if let Some(e) = self.header.exposure.take() {
-            if (e - 1.0).abs() > f32::EPSILON {
-                self.map_samples(|v| v * e);
-            }
+        if let Some(e) = self.header.exposure.take()
+            && (e - 1.0).abs() > f32::EPSILON
+        {
+            self.map_samples(|v| v * e);
         }
     }
 
@@ -2699,11 +2700,7 @@ impl HdrImage {
     /// degenerate-`PIXASPECT` guard as [`Self::square_pixel_dimensions`].
     pub fn display_aspect_ratio(&self) -> f32 {
         let (w, h) = self.square_pixel_dimensions();
-        if h > 0.0 {
-            w / h
-        } else {
-            1.0
-        }
+        if h > 0.0 { w / h } else { 1.0 }
     }
 
     /// Cumulative `EXPOSURE=` multiplier the picture declared, with the
@@ -3046,10 +3043,12 @@ impl HdrImage {
     /// through verbatim rather than raised to a fractional power, which
     /// would be NaN. A second call is a no-op (the slot is `None`).
     pub fn linearize_gamma(&mut self) {
-        if let Some(g) = self.header.gamma.take() {
-            if g > 0.0 && g.is_finite() && (g - 1.0).abs() > f32::EPSILON {
-                self.map_samples(|v| if v > 0.0 { v.powf(g) } else { v });
-            }
+        if let Some(g) = self.header.gamma.take()
+            && g > 0.0
+            && g.is_finite()
+            && (g - 1.0).abs() > f32::EPSILON
+        {
+            self.map_samples(|v| if v > 0.0 { v.powf(g) } else { v });
         }
         self.sync_color_from_header();
     }

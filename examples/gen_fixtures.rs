@@ -12,7 +12,7 @@
 //! review well in a diff and don't bloat the crate's source-package
 //! download.
 
-use oxideav_hdr::{encode, EncodeOptions};
+use oxideav_hdr::{EncodeOptions, encode};
 use std::path::PathBuf;
 
 use oxideav_hdr::{AxisSign, HdrFormat, HdrImage, LineEnding, Primaries, RleMode};

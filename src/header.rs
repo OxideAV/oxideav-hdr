@@ -623,8 +623,8 @@ mod tests {
     fn orientation_all_eight_variants_are_distinct() {
         // The eight legal resolution strings must each name a different
         // orientation — no two triples collapse to the same variant.
-        use std::collections::HashSet;
         use AxisSign::{Decreasing, Increasing};
+        use std::collections::HashSet;
         let mut seen = HashSet::new();
         for &y in &[Decreasing, Increasing] {
             for &x in &[Decreasing, Increasing] {

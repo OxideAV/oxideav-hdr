@@ -227,11 +227,7 @@ pub fn apply(op: ToneMap, rgb: [f32; 3]) -> [f32; 3] {
 
 #[inline]
 fn clamp01(v: f32) -> f32 {
-    if v.is_nan() {
-        0.0
-    } else {
-        v.clamp(0.0, 1.0)
-    }
+    if v.is_nan() { 0.0 } else { v.clamp(0.0, 1.0) }
 }
 
 /// Replace negatives / NaN with zero, but keep finite positive values
@@ -239,11 +235,7 @@ fn clamp01(v: f32) -> f32 {
 /// scene-referred values can legitimately exceed 1.0 before mapping.
 #[inline]
 fn sanitize(v: f32) -> f32 {
-    if v.is_finite() && v > 0.0 {
-        v
-    } else {
-        0.0
-    }
+    if v.is_finite() && v > 0.0 { v } else { 0.0 }
 }
 
 #[inline]
@@ -332,11 +324,7 @@ fn drago(v: f32, scene_max: f32, bias: f32) -> f32 {
 /// (we already clamped so this stays defensive).
 #[inline]
 fn gamma_pow(v: f32, inv_g: f32) -> f32 {
-    if v <= 0.0 {
-        0.0
-    } else {
-        v.powf(inv_g)
-    }
+    if v <= 0.0 { 0.0 } else { v.powf(inv_g) }
 }
 
 /// IEC 61966-2-1 sRGB OETF (linear → encoded). Applied at the very

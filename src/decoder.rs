@@ -21,7 +21,7 @@ use crate::image::{HdrImage, ImageInfo, PixelFormat};
 use crate::limits::HdrLimits;
 use crate::options::DecodeOptions;
 use crate::rgbe::rgbe_to_rgb;
-use crate::rle::{decode_scanline_with_fallback, FallbackMode};
+use crate::rle::{FallbackMode, decode_scanline_with_fallback};
 
 #[cfg(feature = "registry")]
 use oxideav_core::Decoder;
@@ -107,7 +107,7 @@ pub(crate) fn decode_with(input: &[u8], opts: &DecodeOptions) -> Result<HdrImage
             other => {
                 return Err(Error::invalid(format!(
                     "HDR: strict: magic identifier {other:?} is not RADIANCE / RGBE"
-                )))
+                )));
             }
         }
         if !format_seen {
@@ -277,7 +277,7 @@ fn parse_header_ex(input: &[u8], cursor: &mut usize) -> Result<(HdrHeader, bool)
                     "32-bit_rle_rgbe" => HdrFormat::Rgbe,
                     "32-bit_rle_xyze" => HdrFormat::Xyze,
                     other => {
-                        return Err(Error::unsupported(format!("HDR: unknown FORMAT '{other}'")))
+                        return Err(Error::unsupported(format!("HDR: unknown FORMAT '{other}'")));
                     }
                 };
             }
@@ -554,7 +554,7 @@ fn decode_pixel_rows(
     for y in 0..height {
         let chans = decode_scanline_with_fallback(input, cursor, width, &mut prev_pixel, fallback)?;
         let row = &mut plane[y * width * BPP..(y + 1) * width * BPP];
-        for (x, px) in row.chunks_exact_mut(BPP).enumerate() {
+        for (x, px) in row.as_chunks_mut::<BPP>().0.iter_mut().enumerate() {
             let rgbe = [chans[0][x], chans[1][x], chans[2][x], chans[3][x]];
             let rgb = rgbe_to_rgb(rgbe);
             px[0..4].copy_from_slice(&rgb[0].to_le_bytes());

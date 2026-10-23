@@ -24,8 +24,8 @@
 //!   cargo bench --bench encode -- --warm-up-time 1 --measurement-time 3
 //! ```
 
-use criterion::{black_box, criterion_group, criterion_main, Criterion, Throughput};
-use oxideav_hdr::{encode, EncodeOptions};
+use criterion::{Criterion, Throughput, black_box, criterion_group, criterion_main};
+use oxideav_hdr::{EncodeOptions, encode};
 use oxideav_hdr::{HdrImage, RleMode};
 
 /// Build a flat single-colour image of the given dimensions.

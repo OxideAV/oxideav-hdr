@@ -282,7 +282,13 @@ mod tests {
         let back = decode(&bytes).unwrap();
         // b / 255 round-trips through the RGBE grid to within one
         // mantissa step of the dominant channel.
-        for (px, want) in back.pixels().chunks_exact(3).zip(rgb.chunks_exact(3)) {
+        for (px, want) in back
+            .pixels()
+            .as_chunks::<3>()
+            .0
+            .iter()
+            .zip(rgb.as_chunks::<3>().0)
+        {
             let max = want.iter().copied().max().unwrap() as f32 / 255.0;
             for c in 0..3 {
                 let w8 = want[c] as f32 / 255.0;
@@ -399,7 +405,7 @@ mod tests {
         // A padded plane encodes like its tight repack.
         let tight = HdrImage::from_f32(2, 2, (0..12).map(|i| i as f32).collect()).unwrap();
         let mut padded = Vec::new();
-        for row in tight.as_bytes().unwrap().chunks_exact(24) {
+        for row in tight.as_bytes().unwrap().as_chunks::<24>().0 {
             padded.extend_from_slice(row);
             padded.extend_from_slice(&[0xAA; 8]);
         }

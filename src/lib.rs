@@ -109,9 +109,10 @@ pub use rgbe::{
     rgbe_unbiased_exponent,
 };
 pub use rle::FallbackMode;
-pub use tonemap::{tone_map, ToneMap};
+pub use tonemap::{ToneMap, tone_map};
 pub use xyz::{
-    convert_image_rgb_to_xyz, convert_image_rgb_to_xyz_photometric,
+    RGBE_BRIGHT_COEFFS, RgbColorSpace, WHTEFFICACY, convert_image_rgb_to_xyz,
+    convert_image_rgb_to_xyz_photometric,
     convert_image_rgb_to_xyz_photometric_with_effective_primaries,
     convert_image_rgb_to_xyz_photometric_with_primaries,
     convert_image_rgb_to_xyz_with_effective_primaries, convert_image_rgb_to_xyz_with_primaries,
@@ -120,8 +121,7 @@ pub use xyz::{
     convert_image_xyz_to_rgb_photometric_with_primaries,
     convert_image_xyz_to_rgb_with_effective_primaries, convert_image_xyz_to_rgb_with_primaries,
     luminance_lm_per_sr_per_m2, rgb_to_xyz, rgb_to_xyz_matrix, rgb_to_xyz_matrix_from_primaries,
-    xyz_to_rgb, xyz_to_rgb_matrix, xyz_to_rgb_matrix_from_primaries, RgbColorSpace,
-    RGBE_BRIGHT_COEFFS, WHTEFFICACY,
+    xyz_to_rgb, xyz_to_rgb_matrix, xyz_to_rgb_matrix_from_primaries,
 };
 
 // --- framework integration -----------------------------------------------------
@@ -218,11 +218,12 @@ mod tests {
         let back = decode(&bytes).unwrap();
         assert_eq!(back.header.exposure, Some(0.7));
         assert_eq!(back.header.gamma, Some(2.2));
-        assert!(back
-            .header
-            .other
-            .iter()
-            .any(|(k, v)| k == "OXIDEAV" && v == "round1"));
+        assert!(
+            back.header
+                .other
+                .iter()
+                .any(|(k, v)| k == "OXIDEAV" && v == "round1")
+        );
     }
 
     #[test]

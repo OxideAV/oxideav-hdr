@@ -17,7 +17,7 @@
 //! `cargo run --example gen_fixtures`, then commit the updated bytes
 //! together with the change.
 
-use oxideav_hdr::{decode, decode_with, encode, DecodeOptions, EncodeOptions};
+use oxideav_hdr::{DecodeOptions, EncodeOptions, decode, decode_with, encode};
 use std::path::PathBuf;
 
 use oxideav_hdr::{AxisSign, FallbackMode, HdrFormat, HdrPixelFormat, LineEnding, RleMode};
@@ -129,7 +129,7 @@ fn solid_16x8_oldrle_decode_and_reencode() {
 
     // Solid colour — every pixel decodes to (0.5, 0.25, 0.125) within
     // shared-exponent quantisation noise.
-    for px in img.pixels().chunks_exact(3) {
+    for px in img.pixels().as_chunks::<3>().0 {
         assert!((px[0] - 0.500).abs() < 0.01, "R drift: {}", px[0]);
         assert!((px[1] - 0.250).abs() < 0.01, "G drift: {}", px[1]);
         assert!((px[2] - 0.125).abs() < 0.01, "B drift: {}", px[2]);
@@ -168,11 +168,12 @@ fn gradient_32x16_crlf_plusy_decode_and_reencode() {
     // Typed slots: PIXASPECT populated, untyped OXIDEAV preserved in
     // the `other` list.
     assert_eq!(img.header.pixaspect, Some(1.0));
-    assert!(img
-        .header
-        .other
-        .iter()
-        .any(|(k, v)| k == "OXIDEAV" && v == "fixture-r192"));
+    assert!(
+        img.header
+            .other
+            .iter()
+            .any(|(k, v)| k == "OXIDEAV" && v == "fixture-r192")
+    );
 
     // The decoder canonicalises to top-down `(y, x)`. The gradient is
     // monotonic in both axes so the canonical buffer always has its
@@ -317,7 +318,7 @@ fn xyze_24x10_newrle_decode_luminance_and_reencode() {
     // pixel, bit-for-bit, with no 179× factor.
     let lum = img.luminance_buffer();
     assert_eq!(lum.len(), 24 * 10);
-    for (i, px) in img.pixels().chunks_exact(3).enumerate() {
+    for (i, px) in img.pixels().as_chunks::<3>().0.iter().enumerate() {
         assert_eq!(
             lum[i].to_bits(),
             px[1].to_bits(),
@@ -330,7 +331,7 @@ fn xyze_24x10_newrle_decode_luminance_and_reencode() {
     // Scene-referred luminance divides the EXPOSURE=2 record back out:
     // exactly half the stored Y (2^-1 is an exact f32 scale).
     let scene = img.scene_referred_luminance_buffer();
-    for (i, px) in img.pixels().chunks_exact(3).enumerate() {
+    for (i, px) in img.pixels().as_chunks::<3>().0.iter().enumerate() {
         assert_eq!(
             scene[i].to_bits(),
             (px[1] * 0.5).to_bits(),
@@ -351,7 +352,7 @@ fn xyze_24x10_newrle_decode_luminance_and_reencode() {
         y_last > 100.0 && y_last < 1000.0,
         "bottom-right Y = {y_last}"
     );
-    for px in img.pixels().chunks_exact(3) {
+    for px in img.pixels().as_chunks::<3>().0 {
         assert!(
             (px[0] / px[1] - 0.9).abs() < 0.02,
             "X/Y = {}",

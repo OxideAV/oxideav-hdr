@@ -8,7 +8,7 @@
 //! reoriented picture through the real `encode_hdr` -> `parse_hdr` wire
 //! path to prove the transform survives a byte-level round-trip.
 
-use oxideav_hdr::{decode, encode, EncodeOptions};
+use oxideav_hdr::{EncodeOptions, decode, encode};
 use oxideav_hdr::{GeometricOp, HdrImage, HdrPixelFormat, Orientation};
 
 const ALL_ORIENT: [Orientation; 8] = [

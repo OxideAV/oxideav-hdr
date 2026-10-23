@@ -3,11 +3,11 @@
 //! Lives outside `src/` so it exercises the shipped re-exports and
 //! catches accidental visibility regressions.
 
-use oxideav_hdr::{decode, decode_with, encode, DecodeOptions, EncodeOptions};
 use oxideav_hdr::{
     AxisSign, FallbackMode, HdrFormat, HdrImage, HdrPixelFormat, LineEnding, MagicLine,
     Orientation, Primaries, RleMode,
 };
+use oxideav_hdr::{DecodeOptions, EncodeOptions, decode, decode_with, encode};
 
 /// Same gradient construction as the in-crate unit tests, kept here to
 /// avoid making the unit-test helper part of the public surface.
@@ -317,7 +317,7 @@ fn apply_exposure_and_colorcorr_chain_after_decode() {
     // Each pixel should have been multiplied by 0.5 then componentwise
     // by [2, 1, 0.5] → effective [1.0, 0.5, 0.25] starting from
     // [1, 1, 1]. Allow ~1.5% for shared-exponent quantisation.
-    for px in back.pixels().chunks_exact(3) {
+    for px in back.pixels().as_chunks::<3>().0 {
         assert!((px[0] - 1.0).abs() < 0.02, "R: {}", px[0]);
         assert!((px[1] - 0.5).abs() < 0.02, "G: {}", px[1]);
         assert!((px[2] - 0.25).abs() < 0.02, "B: {}", px[2]);
@@ -421,7 +421,7 @@ fn scene_referred_recovery_survives_encode_decode_via_public_api() {
 
     // Non-mutating recovery: slots survive, buffer holds radiance.
     let recovered = back.scene_referred_radiance_buffer();
-    for px in recovered.chunks_exact(3) {
+    for px in recovered.as_chunks::<3>().0 {
         assert!(
             (px[0] - radiance[0]).abs() < 1e-2,
             "{} vs {}",
@@ -729,7 +729,7 @@ fn photometric_xyze_pipeline_survives_encode_decode() {
     // photometric luminance throughout — the full spec §"Physical
     // interpretation" contract on the wire, not just in-memory.
     use oxideav_hdr::{
-        convert_image_rgb_to_xyz_photometric, convert_image_xyz_to_rgb_photometric, RgbColorSpace,
+        RgbColorSpace, convert_image_rgb_to_xyz_photometric, convert_image_xyz_to_rgb_photometric,
     };
 
     let mut img = gradient(16, 8);

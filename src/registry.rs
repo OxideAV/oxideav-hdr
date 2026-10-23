@@ -207,7 +207,7 @@ impl HdrImage {
             other => {
                 return Err(HdrError::unsupported(format!(
                     "HDR: pixel format {other:?} not supported (RgbF32Le / Rgb24 / Rgba)"
-                )))
+                )));
             }
         };
         // Per-frame record refines the stream-level description; an
@@ -305,7 +305,7 @@ impl CodecOptionsStruct for EncodeOptions {
                     other => {
                         return Err(oxideav_core::Error::invalid(format!(
                             "HDR encoder: invalid rle {other:?}"
-                        )))
+                        )));
                     }
                 }
             }
@@ -316,7 +316,7 @@ impl CodecOptionsStruct for EncodeOptions {
                     other => {
                         return Err(oxideav_core::Error::invalid(format!(
                             "HDR encoder: invalid line_ending {other:?}"
-                        )))
+                        )));
                     }
                 }
             }
@@ -329,7 +329,7 @@ impl CodecOptionsStruct for EncodeOptions {
             other => {
                 return Err(oxideav_core::Error::invalid(format!(
                     "HDR encoder: unknown option {other:?}"
-                )))
+                )));
             }
         }
         Ok(())

@@ -149,7 +149,7 @@ fn decode_uncompressed(
         Vec::with_capacity(width),
     ];
     let bytes = &src[*pos..*pos + need];
-    for quad in bytes.chunks_exact(4) {
+    for quad in bytes.as_chunks::<4>().0 {
         out[0].push(quad[0]);
         out[1].push(quad[1]);
         out[2].push(quad[2]);
@@ -640,7 +640,7 @@ mod tests {
     fn channel_roundtrip_mixed() {
         let mut encoded = Vec::new();
         let mut data = (0..50u8).collect::<Vec<_>>();
-        data.extend(std::iter::repeat(0x77).take(40));
+        data.extend(std::iter::repeat_n(0x77, 40));
         data.extend(50..60u8);
         let chans = [data.clone(), data.clone(), data.clone(), data.clone()];
         let w = data.len();
@@ -914,14 +914,16 @@ mod tests {
         let bytes = [0u8; 10];
         let mut pos = 0;
         let mut prev = None;
-        assert!(decode_scanline_with_fallback(
-            &bytes,
-            &mut pos,
-            4,
-            &mut prev,
-            FallbackMode::Uncompressed,
-        )
-        .is_err());
+        assert!(
+            decode_scanline_with_fallback(
+                &bytes,
+                &mut pos,
+                4,
+                &mut prev,
+                FallbackMode::Uncompressed,
+            )
+            .is_err()
+        );
     }
 
     #[test]

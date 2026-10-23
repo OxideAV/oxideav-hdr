@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- edition 2024, MSRV 1.95
+
 ## [0.0.6](https://github.com/OxideAV/oxideav-hdr/compare/v0.0.5...v0.0.6) - 2026-10-04
 
 ### Other

@@ -96,11 +96,7 @@ pub fn rgbe_is_zero_pixel(rgbe: [u8; 4]) -> bool {
 #[inline]
 pub fn rgbe_unbiased_exponent(rgbe: [u8; 4]) -> Option<i32> {
     let e = rgbe[3];
-    if e == 0 {
-        None
-    } else {
-        Some(e as i32 - 128)
-    }
+    if e == 0 { None } else { Some(e as i32 - 128) }
 }
 
 /// Returns the shared per-channel scale factor of an RGBE pixel — the
@@ -300,11 +296,7 @@ fn frexp(f: f32) -> (f32, i32) {
 /// format has no representation for any of them.
 #[inline]
 fn sanitize(v: f32) -> f32 {
-    if v.is_finite() && v > 0.0 {
-        v
-    } else {
-        0.0
-    }
+    if v.is_finite() && v > 0.0 { v } else { 0.0 }
 }
 
 #[cfg(test)]

@@ -25,8 +25,8 @@
 //! discipline); the quad streams come from a small deterministic LCG so
 //! the matrix is reproducible and the wall stays spec-only.
 
-use oxideav_hdr::{decode_with, encode, DecodeOptions, EncodeOptions};
 use oxideav_hdr::{AxisSign, FallbackMode, HdrHeader, HdrImage, LineEnding, Orientation, RleMode};
+use oxideav_hdr::{DecodeOptions, EncodeOptions, decode_with, encode};
 
 /// Deterministic 64-bit linear-congruential generator (Numerical Recipes
 /// constants). Reproducible across runs; no external dependency.

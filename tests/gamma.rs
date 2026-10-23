@@ -12,7 +12,7 @@
 //! order end-to-end (not merely on an in-memory buffer).
 
 use oxideav_hdr::HdrImage;
-use oxideav_hdr::{decode, encode, EncodeOptions};
+use oxideav_hdr::{EncodeOptions, decode, encode};
 
 /// Build a picture whose stored channels the encoder can represent
 /// exactly enough for the shared-exponent round-trip, then attach a

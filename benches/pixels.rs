@@ -26,9 +26,9 @@
 //!   cargo bench --bench pixels -- --warm-up-time 1 --measurement-time 3
 //! ```
 
-use criterion::{black_box, criterion_group, criterion_main, BatchSize, Criterion, Throughput};
+use criterion::{BatchSize, Criterion, Throughput, black_box, criterion_group, criterion_main};
 use oxideav_hdr::{
-    convert_image_rgb_to_xyz, convert_image_xyz_to_rgb, tone_map, HdrImage, RgbColorSpace, ToneMap,
+    HdrImage, RgbColorSpace, ToneMap, convert_image_rgb_to_xyz, convert_image_xyz_to_rgb, tone_map,
 };
 
 /// Build a gradient whose radiance ramps from 1e-3 in the top-left

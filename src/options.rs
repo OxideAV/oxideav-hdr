@@ -105,34 +105,34 @@ impl DecodeOptions {
     /// Check a resolution line's geometry against the limits. `bytes`
     /// is the decoded plane size the native layout implies.
     pub(crate) fn check(&self, width: u32, height: u32, bytes: u64) -> Result<()> {
-        if let Some(m) = self.max_width {
-            if width > m {
-                return Err(HdrError::limit(format!(
-                    "HDR: resolution width {width} exceeds max_width {m}"
-                )));
-            }
+        if let Some(m) = self.max_width
+            && width > m
+        {
+            return Err(HdrError::limit(format!(
+                "HDR: resolution width {width} exceeds max_width {m}"
+            )));
         }
-        if let Some(m) = self.max_height {
-            if height > m {
-                return Err(HdrError::limit(format!(
-                    "HDR: resolution height {height} exceeds max_height {m}"
-                )));
-            }
+        if let Some(m) = self.max_height
+            && height > m
+        {
+            return Err(HdrError::limit(format!(
+                "HDR: resolution height {height} exceeds max_height {m}"
+            )));
         }
         let pixels = u64::from(width) * u64::from(height);
-        if let Some(m) = self.max_pixels {
-            if pixels > m {
-                return Err(HdrError::limit(format!(
-                    "HDR: {pixels} pixels exceed max_pixels {m}"
-                )));
-            }
+        if let Some(m) = self.max_pixels
+            && pixels > m
+        {
+            return Err(HdrError::limit(format!(
+                "HDR: {pixels} pixels exceed max_pixels {m}"
+            )));
         }
-        if let Some(m) = self.max_bytes {
-            if bytes > m {
-                return Err(HdrError::limit(format!(
-                    "HDR: decoded plane of {bytes} bytes exceeds max_bytes {m}"
-                )));
-            }
+        if let Some(m) = self.max_bytes
+            && bytes > m
+        {
+            return Err(HdrError::limit(format!(
+                "HDR: decoded plane of {bytes} bytes exceeds max_bytes {m}"
+            )));
         }
         Ok(())
     }

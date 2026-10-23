@@ -222,7 +222,7 @@ impl Encoder for HdrEncoder {
             _ => {
                 return Err(oxideav_core::Error::invalid(
                     "HDR encoder: expected video frame",
-                ))
+                ));
             }
         };
         let img = HdrImage::from_video_frame(vf, &self.in_params)?;
@@ -676,7 +676,7 @@ fn write_pixel_rows(
     let row_len = width * BPP;
     for y in 0..height {
         let row = &pixels[y * row_len..(y + 1) * row_len];
-        for (x, px) in row.chunks_exact(BPP).enumerate() {
+        for (x, px) in row.as_chunks::<BPP>().0.iter().enumerate() {
             let rgbe = rgb_to_rgbe([
                 f32::from_le_bytes([px[0], px[1], px[2], px[3]]),
                 f32::from_le_bytes([px[4], px[5], px[6], px[7]]),
@@ -730,7 +730,7 @@ fn write_pixel_rows(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{decode, decode_with, encode, DecodeOptions};
+    use crate::{DecodeOptions, decode, decode_with, encode};
 
     fn pattern(w: u32, h: u32) -> HdrImage {
         let mut pixels = Vec::with_capacity((w * h * 3) as usize);
@@ -1082,9 +1082,11 @@ mod tests {
                 .with_line_ending(LineEnding::Crlf),
         )
         .unwrap();
-        assert!(bytes
-            .windows(b"#?RADIANCE\r\nrpict scene.oct\r\n".len())
-            .any(|w| w == b"#?RADIANCE\r\nrpict scene.oct\r\n"));
+        assert!(
+            bytes
+                .windows(b"#?RADIANCE\r\nrpict scene.oct\r\n".len())
+                .any(|w| w == b"#?RADIANCE\r\nrpict scene.oct\r\n")
+        );
         let back = decode(&bytes).unwrap();
         assert_eq!(back.header.commands, vec!["rpict scene.oct"]);
     }
@@ -1169,7 +1171,7 @@ mod tests {
         let original = b"#?SOMEOTHERWRITER v3\nFORMAT=32-bit_rle_rgbe\n\n-Y 2 +X 16\n".to_vec();
         // Append a flat uncompressed pixel section so the decode succeeds.
         let mut file = original.clone();
-        file.extend(std::iter::repeat(0u8).take(16 * 2 * 4));
+        file.extend(std::iter::repeat_n(0u8, 16 * 2 * 4));
         let decoded = crate::decode_with(
             &file,
             &crate::DecodeOptions::default().with_fallback(crate::FallbackMode::Uncompressed),

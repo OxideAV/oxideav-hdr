@@ -6,10 +6,10 @@
 //! understands, decoder accepts a file ImageMagick produced) and the
 //! XYZE↔RGB conversion helpers' numerical accuracy.
 
-use oxideav_hdr::{decode, encode, EncodeOptions};
+use oxideav_hdr::{EncodeOptions, decode, encode};
 use std::process::Command;
 
-use oxideav_hdr::{convert_image_rgb_to_xyz, convert_image_xyz_to_rgb, HdrImage, RgbColorSpace};
+use oxideav_hdr::{HdrImage, RgbColorSpace, convert_image_rgb_to_xyz, convert_image_xyz_to_rgb};
 
 fn have_magick() -> bool {
     Command::new("magick")
