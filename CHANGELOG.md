@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.0.8](https://github.com/OxideAV/oxideav-hdr/compare/v0.0.7...v0.0.8) - 2026-11-07
+
+### Other
+
+- API hygiene: non_exhaustive option enums + HdrHeader, hide container/rle
+
 ### Changed
 
 - `#[non_exhaustive]` on the `MagicLine`, `RleMode`, `FallbackMode`, `ToneMap` and `RgbColorSpace` enums and on the `HdrHeader` record (build it with `Default` / `HdrHeader::new` and the `with_*` builders). `LineEnding`, `HdrFormat`, `AxisSign`, `Orientation` and `GeometricOp` stay exhaustive: the format and the eight axis arrangements fix their values; `Primaries` is a plain value type.
