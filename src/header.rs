@@ -475,6 +475,7 @@ impl Primaries {
 /// Header carried inside [`crate::HdrImage`]. Everything optional has
 /// `Option<…>` so `Default` produces something writable.
 #[derive(Debug, Clone, PartialEq)]
+#[non_exhaustive]
 pub struct HdrHeader {
     /// The identifier carried on the `#?…` magic line, with the leading
     /// `#?` stripped — e.g. `"RADIANCE"`, `"RGBE"`, or the name of the
@@ -562,6 +563,104 @@ impl Default for HdrHeader {
             x_sign: AxisSign::Increasing,
             x_first: false,
         }
+    }
+}
+
+impl HdrHeader {
+    /// A default header: `FORMAT=32-bit_rle_rgbe`, no optional records,
+    /// standard `-Y H +X W` resolution line.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Set `magic_id`.
+    pub fn with_magic_id(mut self, magic_id: Option<String>) -> Self {
+        self.magic_id = magic_id;
+        self
+    }
+
+    /// Set `format`.
+    pub fn with_format(mut self, format: HdrFormat) -> Self {
+        self.format = format;
+        self
+    }
+
+    /// Set `exposure`.
+    pub fn with_exposure(mut self, exposure: Option<f32>) -> Self {
+        self.exposure = exposure;
+        self
+    }
+
+    /// Set `gamma`.
+    pub fn with_gamma(mut self, gamma: Option<f32>) -> Self {
+        self.gamma = gamma;
+        self
+    }
+
+    /// Set `software`.
+    pub fn with_software(mut self, software: Option<String>) -> Self {
+        self.software = software;
+        self
+    }
+
+    /// Set `pixaspect`.
+    pub fn with_pixaspect(mut self, pixaspect: Option<f32>) -> Self {
+        self.pixaspect = pixaspect;
+        self
+    }
+
+    /// Set `view`.
+    pub fn with_view(mut self, view: Option<String>) -> Self {
+        self.view = view;
+        self
+    }
+
+    /// Set `colorcorr`.
+    pub fn with_colorcorr(mut self, colorcorr: Option<[f32; 3]>) -> Self {
+        self.colorcorr = colorcorr;
+        self
+    }
+
+    /// Set `primaries`.
+    pub fn with_primaries(mut self, primaries: Option<Primaries>) -> Self {
+        self.primaries = primaries;
+        self
+    }
+
+    /// Set `other`.
+    pub fn with_other(mut self, other: Vec<(String, String)>) -> Self {
+        self.other = other;
+        self
+    }
+
+    /// Set `comments`.
+    pub fn with_comments(mut self, comments: Vec<String>) -> Self {
+        self.comments = comments;
+        self
+    }
+
+    /// Set `commands`.
+    pub fn with_commands(mut self, commands: Vec<String>) -> Self {
+        self.commands = commands;
+        self
+    }
+
+    /// Set `y_sign`.
+    pub fn with_y_sign(mut self, y_sign: AxisSign) -> Self {
+        self.y_sign = y_sign;
+        self
+    }
+
+    /// Set `x_sign`.
+    pub fn with_x_sign(mut self, x_sign: AxisSign) -> Self {
+        self.x_sign = x_sign;
+        self
+    }
+
+    /// Set `x_first`.
+    pub fn with_x_first(mut self, x_first: bool) -> Self {
+        self.x_first = x_first;
+        self
     }
 }
 

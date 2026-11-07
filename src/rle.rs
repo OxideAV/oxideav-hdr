@@ -62,6 +62,7 @@ use crate::error::{HdrError as Error, Result};
 /// to preserve compatibility with every fixture and downstream consumer
 /// that landed before round 196.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum FallbackMode {
     /// Treat each 4-byte quad after a missed new-RLE marker as a literal
     /// RGBE pixel. The most permissive choice — never misinterprets a

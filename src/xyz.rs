@@ -53,6 +53,7 @@
 
 /// Identifier for one of the supported RGB working spaces.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum RgbColorSpace {
     /// sRGB / Rec. 709 primaries with a D65 reference white. The
     /// matrix matches IEC 61966-2-1 Annex C and is what mainstream

@@ -57,6 +57,7 @@ use crate::image::HdrImage;
 
 /// Available tone-mapping operators.
 #[derive(Debug, Clone, Copy, PartialEq)]
+#[non_exhaustive]
 pub enum ToneMap {
     /// `clamp(v * exposure, 0, 1)` per channel. No gamma — output is
     /// linear-light quantised to `u8` (mostly useful for debugging or

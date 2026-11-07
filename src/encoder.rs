@@ -80,6 +80,7 @@ impl LineEnding {
 /// round-trip can preserve the original magic line verbatim instead of
 /// rewriting every file's identifier to `RADIANCE`.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum MagicLine {
     /// `#?RADIANCE` — the canonical identifier described by the staged
     /// spec and emitted by every shipped fixture in the Radiance
@@ -114,6 +115,7 @@ impl MagicLine {
 
 /// Choice of RLE flavour for the encoded scanlines.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum RleMode {
     /// The adaptive new-RLE flavour (`0x02 0x02 hi lo` marker per
     /// scanline) described in §"Scanline flavors (RLE)" of

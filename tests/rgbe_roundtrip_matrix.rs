@@ -90,6 +90,7 @@ fn fallback_for(rle: RleMode) -> FallbackMode {
         // Smallest mixes new-RLE and flat scanlines — its flat rows
         // must be read flat, never as old-RLE sentinels.
         RleMode::Uncompressed | RleMode::Smallest => FallbackMode::Uncompressed,
+        other => panic!("no fallback mapping for {other:?}"),
     }
 }
 
@@ -235,10 +236,7 @@ fn xyze_quads_round_trip_bit_exactly_across_orientation_and_rle() {
                 if rle == RleMode::New && !(8..=32767).contains(&on_disk_scanline_w) {
                     continue;
                 }
-                let mut header = HdrHeader {
-                    format: HdrFormat::Xyze,
-                    ..HdrHeader::default()
-                };
+                let mut header = HdrHeader::default().with_format(HdrFormat::Xyze);
                 header.set_orientation(orientation);
                 let img = HdrImage::from_rgbe_quads(w, h, &quads, header).unwrap();
                 let bytes = encode(
@@ -277,17 +275,15 @@ fn rgbe_quads_round_trip_preserves_typed_header_records() {
     let mut rng = Lcg::new(99);
     let (w, h) = (24u32, 3u32);
     let quads = normalised_quads(&mut rng, (w * h) as usize);
-    let header = HdrHeader {
-        exposure: Some(1.5),
-        gamma: Some(2.2),
-        pixaspect: Some(0.75),
-        colorcorr: Some([1.1, 1.0, 0.9]),
-        primaries: Some(Primaries::REC2020),
-        software: Some("oxideav-hdr/matrix".to_owned()),
-        view: Some("rpict -vp 0 0 5 -vd 0 0 -1".to_owned()),
-        y_sign: AxisSign::Decreasing,
-        ..HdrHeader::default()
-    };
+    let header = HdrHeader::default()
+        .with_exposure(Some(1.5))
+        .with_gamma(Some(2.2))
+        .with_pixaspect(Some(0.75))
+        .with_colorcorr(Some([1.1, 1.0, 0.9]))
+        .with_primaries(Some(Primaries::REC2020))
+        .with_software(Some("oxideav-hdr/matrix".to_owned()))
+        .with_view(Some("rpict -vp 0 0 5 -vd 0 0 -1".to_owned()))
+        .with_y_sign(AxisSign::Decreasing);
     let img = HdrImage::from_rgbe_quads(w, h, &quads, header).unwrap();
     let bytes = encode(
         &img,

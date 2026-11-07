@@ -55,6 +55,7 @@
 
 pub mod api;
 #[cfg(feature = "registry")]
+#[doc(hidden)]
 pub mod container;
 pub mod decoder;
 pub mod encoder;
@@ -66,6 +67,7 @@ pub mod options;
 #[cfg(feature = "registry")]
 pub mod registry;
 pub mod rgbe;
+#[doc(hidden)]
 pub mod rle;
 pub mod tonemap;
 pub mod xyz;
